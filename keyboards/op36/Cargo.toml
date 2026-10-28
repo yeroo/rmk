@@ -19,6 +19,7 @@ rmk = { path = "../../rmk", default-features = false, features = [
     "storage",
     "vial",
     "vial_lock",
+    "layer_notify",
     "universal_symbols",
     "nrf52840_ble",
     "split",
