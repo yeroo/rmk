@@ -150,6 +150,9 @@ vial = ["host"]
 ## Enable vial lock feature
 vial_lock = ["vial", "host_security"]
 
+## Push the active layer to a subscribed Vial host (OP36 layout helper).
+layer_notify = ["host"]
+
 ## Enable DFU lock feature — physical key unlock for DFU firmware download
 dfu_lock = ["host_security"]
 
