@@ -38,6 +38,11 @@ pub fn update_layout(layout: u8) {
     HOST_LAYOUT.store(layout, Ordering::Relaxed);
 }
 
+/// Host layout last reported by the configurator (`None` until the host sends one).
+pub fn layout() -> Option<u8> {
+    known(HOST_LAYOUT.load(Ordering::Relaxed))
+}
+
 pub fn clear_time() {
     HOST_HOUR.store(UNKNOWN, Ordering::Relaxed);
     HOST_MINUTE.store(UNKNOWN, Ordering::Relaxed);

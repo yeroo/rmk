@@ -297,8 +297,7 @@ impl KeyMapInner<'_> {
     fn update_fn_layer_state(&mut self) {
         if self.num_layer > 3 {
             self.layer_state[3] = self.layer_state[1] && self.layer_state[2];
-            let layer = self.get_activated_layer();
-            publish_event(LayerChangeEvent::new(layer));
+            self.publish_layer_change();
         }
     }
 
@@ -307,8 +306,31 @@ impl KeyMapInner<'_> {
             self.layer_state[tri_layer[2] as usize] =
                 self.layer_state[tri_layer[0] as usize] && self.layer_state[tri_layer[1] as usize];
         }
+        self.publish_layer_change();
+    }
+
+    /// Bit `i` set when layer `i` is explicitly active (the default layer is not included).
+    fn layer_mask(&self) -> u16 {
+        self.layer_state
+            .iter()
+            .take(16)
+            .enumerate()
+            .fold(0u16, |mask, (i, on)| if *on { mask | (1 << i) } else { mask })
+    }
+
+    fn publish_layer_change(&self) {
         let layer = self.get_activated_layer();
         publish_event(LayerChangeEvent::new(layer));
+        #[cfg(feature = "layer_notify")]
+        crate::host::layer_notify::notify(
+            crate::host::layer_notify::LayerState {
+                active: layer,
+                default: self.behavior.default_layer,
+                mask: self.layer_mask(),
+                fw_layout: crate::host_data::layout().unwrap_or(0),
+            },
+            crate::host::layer_notify::now_ms(),
+        );
     }
 
     fn activate_layer(&mut self, layer_num: u8) {
@@ -460,6 +482,11 @@ impl<'a> KeyMap<'a> {
     /// Active layer index (after layer-toggle/momentary updates).
     pub fn active_layer(&self) -> u8 {
         self.inner.borrow().get_activated_layer()
+    }
+
+    /// Bitmask of explicitly active layers; see `KeyMapInner::layer_mask`.
+    pub fn layer_mask(&self) -> u16 {
+        self.inner.borrow().layer_mask()
     }
 
     pub(crate) fn set_action_at(&self, pos: KeyboardEventPos, layer: usize, action: KeyAction) {

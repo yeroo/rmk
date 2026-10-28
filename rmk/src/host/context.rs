@@ -357,6 +357,10 @@ impl<'a> KeyboardContext<'a> {
         self.keymap.get_default_layer()
     }
 
+    pub fn layer_mask(&self) -> u16 {
+        self.keymap.layer_mask()
+    }
+
     // ── Matrix state (host_security) ─────────────────────────────────────
 
     #[cfg(feature = "host_security")]

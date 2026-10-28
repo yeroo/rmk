@@ -143,6 +143,104 @@ mod tests {
         assert_eq!(active_subscriber(1), None);
     }
 
+    /// Build a 1x1 keymap with four layers (so the tri-layer rule applies) and run `f` against it.
+    fn with_four_layer_keymap(f: impl FnOnce(&crate::keymap::KeyMap)) {
+        use crate::config::{BehaviorConfig, PositionalConfig};
+        use crate::keymap::{KeyMap, KeymapData};
+        use rmk_types::action::KeyAction;
+
+        let mut data = KeymapData::new([[[KeyAction::No]]; 4]);
+        let mut behavior = BehaviorConfig::default();
+        let positional = PositionalConfig::<1, 1>::default();
+        let keymap = embassy_futures::block_on(KeyMap::new(&mut data, &mut behavior, &positional));
+        f(&keymap);
+    }
+
+    fn drain_usb_replies() {
+        while crate::channel::HOST_USB_REPLY.try_receive().is_ok() {}
+    }
+
+    #[test]
+    fn layer_mask_reports_all_active_layers() {
+        with_four_layer_keymap(|keymap| {
+            keymap.activate_layer(1);
+            keymap.activate_layer(2);
+            keymap.update_fn_layer_state(); // what keyboard.rs does after MO(1)/MO(2): layer 3 = 1 && 2
+            assert_eq!(keymap.active_layer(), 3);
+            assert_eq!(keymap.layer_mask(), 0b0000_1110);
+        });
+    }
+
+    #[test]
+    fn no_subscriber_sends_nothing() {
+        let _g = test_lock().lock().unwrap();
+        drain_usb_replies();
+        subscribe(HostTransport::Usb, 0, 0);
+        notify(
+            LayerState {
+                active: 1,
+                default: 0,
+                mask: 0b10,
+                fw_layout: 0,
+            },
+            0,
+        );
+        assert!(crate::channel::HOST_USB_REPLY.try_receive().is_err());
+    }
+
+    #[test]
+    fn subscribed_layer_change_is_sent_on_usb() {
+        let _g = test_lock().lock().unwrap();
+        drain_usb_replies();
+        subscribe(HostTransport::Usb, 60, 0);
+        notify(
+            LayerState {
+                active: 2,
+                default: 0,
+                mask: 0b100,
+                fw_layout: 1,
+            },
+            10,
+        );
+        let sent = crate::channel::HOST_USB_REPLY.try_receive().expect("one reply queued");
+        assert_eq!(&sent[..7], &[0xE9, 0x01, 2, 0, 0x04, 0x00, 1]);
+    }
+
+    #[test]
+    fn full_reply_queue_drops_notification() {
+        let _g = test_lock().lock().unwrap();
+        drain_usb_replies();
+        subscribe(HostTransport::Usb, 60, 0);
+        while crate::channel::HOST_USB_REPLY.try_send([0u8; 32]).is_ok() {}
+        notify(
+            LayerState {
+                active: 1,
+                default: 0,
+                mask: 0b10,
+                fw_layout: 0,
+            },
+            0,
+        ); // must not panic
+        assert_eq!(
+            active_subscriber(0),
+            Some(HostTransport::Usb),
+            "dropping a packet does not unsubscribe"
+        );
+        drain_usb_replies();
+    }
+
+    #[test]
+    fn keymap_layer_change_notifies_subscriber() {
+        let _g = test_lock().lock().unwrap();
+        drain_usb_replies();
+        subscribe(HostTransport::Usb, 60, 0);
+        with_four_layer_keymap(|keymap| {
+            keymap.activate_layer(1);
+            let sent = crate::channel::HOST_USB_REPLY.try_receive().expect("layer change pushed");
+            assert_eq!(&sent[..6], &[0xE9, 0x01, 1, 0, 0x02, 0x00]);
+        });
+    }
+
     #[test]
     fn ttl_is_clamped_to_max() {
         let _g = test_lock().lock().unwrap();
