@@ -14,6 +14,8 @@ use crate::config::{RmkConfig, VialConfig};
 use crate::core_traits::Runnable;
 use crate::hid::ViaReport;
 use crate::host::context::KeyboardContext;
+#[cfg(feature = "layer_notify")]
+use crate::host::layer_notify;
 use crate::host::via::keycode_convert::{from_via_keycode, to_via_keycode};
 use crate::{MACRO_SPACE_SIZE, boot};
 
@@ -452,6 +454,9 @@ pub struct VialService<'a> {
     vial_config: VialConfig<'static>,
     #[cfg(feature = "vial_lock")]
     locker: vial_lock::VialLock<'a>,
+    /// Transport of the request being processed; layer_notify subscribes it.
+    #[cfg(feature = "layer_notify")]
+    last_transport: Option<crate::channel::HostTransport>,
 }
 
 impl<'a> VialService<'a> {
@@ -465,6 +470,23 @@ impl<'a> VialService<'a> {
                 ctx.keymap,
                 config.vial_config.vial_insecure,
             ),
+            #[cfg(feature = "layer_notify")]
+            last_transport: None,
+        }
+    }
+
+    #[cfg(feature = "layer_notify")]
+    fn is_layer_notify_request(&self, report: &ViaReport) -> bool {
+        report.output_data[1] == layer_notify::NAMESPACE && report.output_data[2] == layer_notify::SUB_STATE
+    }
+
+    #[cfg(feature = "layer_notify")]
+    fn layer_state(&self) -> layer_notify::LayerState {
+        layer_notify::LayerState {
+            active: self.ctx.active_layer(),
+            default: self.ctx.default_layer(),
+            mask: self.ctx.layer_mask(),
+            fw_layout: crate::host_data::layout().unwrap_or(0),
         }
     }
 
@@ -547,6 +569,14 @@ impl<'a> VialService<'a> {
                 warn!("Dynamic keymap reset -- not supported")
             }
             ViaCommand::CustomSetValue => {
+                #[cfg(feature = "layer_notify")]
+                if self.is_layer_notify_request(report) {
+                    if let Some(transport) = self.last_transport {
+                        layer_notify::subscribe(transport, report.output_data[3], layer_notify::now_ms());
+                    }
+                    report.input_data = layer_notify::encode_state(self.layer_state());
+                    return;
+                }
                 if report.output_data[1] == ERGOHAVEN_CUSTOM_NAMESPACE
                     && report.output_data[2] == ERGOHAVEN_CUSTOM_NATIVE_KEY_ACTION
                 {
@@ -565,6 +595,11 @@ impl<'a> VialService<'a> {
                 }
             }
             ViaCommand::CustomGetValue => {
+                #[cfg(feature = "layer_notify")]
+                if self.is_layer_notify_request(report) {
+                    report.input_data = layer_notify::encode_state(self.layer_state());
+                    return;
+                }
                 if report.output_data[1] == ERGOHAVEN_CUSTOM_NAMESPACE
                     && report.output_data[2] == ERGOHAVEN_CUSTOM_BATTERY_HALVES
                 {
@@ -754,6 +789,10 @@ impl Runnable for VialService<'_> {
             if process_host_data_packet(&output_data) {
                 continue;
             }
+            #[cfg(feature = "layer_notify")]
+            {
+                self.last_transport = Some(transport);
+            }
             let mut report = ViaReport {
                 input_data: output_data,
                 output_data,
@@ -766,7 +805,7 @@ impl Runnable for VialService<'_> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "storage")]
+    #[cfg(any(feature = "storage", feature = "layer_notify"))]
     use std::sync::{Mutex, OnceLock};
 
     use embassy_futures::block_on;
@@ -824,6 +863,66 @@ mod tests {
             input_data: output_data,
             output_data,
         }
+    }
+
+    /// A report whose first four output bytes are `prefix`, verbatim.
+    #[cfg(feature = "layer_notify")]
+    fn raw_report(prefix: [u8; 4]) -> ViaReport {
+        let mut output_data = [0u8; 32];
+        output_data[..4].copy_from_slice(&prefix);
+        ViaReport {
+            input_data: output_data,
+            output_data,
+        }
+    }
+
+    #[cfg(feature = "layer_notify")]
+    fn layer_notify_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(feature = "layer_notify")]
+    #[test]
+    fn layer_notify_subscribe_replies_with_state_and_subscribes() {
+        use crate::channel::HostTransport;
+        use crate::host::layer_notify::active_subscriber;
+        let _g = layer_notify_test_lock().lock().unwrap();
+        with_service(|service| {
+            service.last_transport = Some(HostTransport::Usb);
+            let mut report = raw_report([0x07, 0xE9, 0x01, 30]);
+            block_on(service.process_via_packet(&mut report));
+            // mask excludes the default layer unless explicitly activated
+            assert_eq!(&report.input_data[..7], &[0xE9, 0x01, 0, 0, 0x00, 0x00, 0]);
+            assert_eq!(active_subscriber(29_999), Some(HostTransport::Usb));
+            assert_eq!(active_subscriber(30_000), None);
+        });
+    }
+
+    #[cfg(feature = "layer_notify")]
+    #[test]
+    fn layer_notify_get_state_does_not_subscribe() {
+        use crate::channel::HostTransport;
+        use crate::host::layer_notify::{active_subscriber, subscribe};
+        let _g = layer_notify_test_lock().lock().unwrap();
+        with_service(|service| {
+            service.last_transport = Some(HostTransport::Usb);
+            subscribe(HostTransport::Usb, 0, 0);
+            let mut report = raw_report([0x08, 0xE9, 0x01, 0]);
+            block_on(service.process_via_packet(&mut report));
+            assert_eq!(&report.input_data[..2], &[0xE9, 0x01]);
+            assert_eq!(active_subscriber(0), None);
+        });
+    }
+
+    #[cfg(feature = "layer_notify")]
+    #[test]
+    fn layer_notify_unknown_subid_is_echoed() {
+        with_service(|service| {
+            let mut report = raw_report([0x07, 0xE9, 0x02, 0]);
+            block_on(service.process_via_packet(&mut report));
+            assert_eq!(report.input_data[0], 0x07);
+        });
     }
 
     fn native_dynamic_action_report(command: ViaCommand, kind: u8, index: u8, field: u8) -> ViaReport {
