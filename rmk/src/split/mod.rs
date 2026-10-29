@@ -9,6 +9,7 @@ use crate::event::{BatteryStatusEvent, BleAdvertisingMode};
 use crate::event::{KeyboardEvent, PointingEvent};
 
 #[cfg(feature = "_ble")]
+pub mod role;
 pub(crate) mod battery;
 #[cfg(feature = "_ble")]
 pub mod ble;
