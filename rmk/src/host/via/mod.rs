@@ -95,6 +95,24 @@ fn host_data_text(data: &[u8; 32]) -> &str {
     }
 }
 
+/// Flags byte of the battery-halves reply: bit0/1 = left/right level known, bit2/3 = left/right on
+/// USB power (the layout helper draws a charging bolt from these).
+fn battery_flags(left: rmk_types::battery::BatteryStatus, right: rmk_types::battery::BatteryStatus) -> u8 {
+    let charging = |status: rmk_types::battery::BatteryStatus| {
+        matches!(
+            status,
+            rmk_types::battery::BatteryStatus::Available {
+                charge_state: rmk_types::battery::ChargeState::Charging,
+                ..
+            }
+        )
+    };
+    (battery_level_byte(left).is_some() as u8)
+        | (battery_level_byte(right).is_some() as u8) << 1
+        | (charging(left) as u8) << 2
+        | (charging(right) as u8) << 3
+}
+
 fn battery_level_byte(status: rmk_types::battery::BatteryStatus) -> Option<u8> {
     match status {
         rmk_types::battery::BatteryStatus::Available { level: Some(level), .. } if level <= 100 => Some(level),
@@ -620,12 +638,11 @@ impl<'a> VialService<'a> {
                             crate::SPLIT_PERIPHERALS_NUM,
                             crate::split::role::central_is_left_now(),
                         );
+                        report.input_data[4] = battery_flags(left, right);
                         if let Some(level) = battery_level_byte(left) {
-                            report.input_data[4] |= 0x01;
                             report.input_data[5] = level;
                         }
                         if let Some(level) = battery_level_byte(right) {
-                            report.input_data[4] |= 0x02;
                             report.input_data[6] = level;
                         }
                     }
@@ -1402,6 +1419,22 @@ mod tests {
             block_on(service.process_via_packet(&mut report));
             assert_eq!(report.input_data[4], NATIVE_KEY_ACTION_STATUS_INVALID_PAYLOAD);
         });
+    }
+
+    #[test]
+    fn battery_flags_mark_presence_and_charging() {
+        let charging = |level| BatteryStatus::Available {
+            charge_state: ChargeState::Charging,
+            level: Some(level),
+        };
+        let discharging = |level| BatteryStatus::Available {
+            charge_state: ChargeState::Discharging,
+            level: Some(level),
+        };
+        assert_eq!(battery_flags(charging(85), discharging(40)), 0b0000_0111);
+        assert_eq!(battery_flags(charging(85), BatteryStatus::Unavailable), 0b0000_0101);
+        assert_eq!(battery_flags(discharging(10), charging(100)), 0b0000_1011);
+        assert_eq!(battery_flags(BatteryStatus::Unavailable, BatteryStatus::Unavailable), 0);
     }
 
     fn battery(level: u8) -> BatteryStatus {

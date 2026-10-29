@@ -17,6 +17,10 @@ use crate::channel::{HostTransport, try_send_host_reply};
 pub(crate) const NAMESPACE: u8 = 0xE9;
 /// Sub-id: layer state (subscribe / get / notification).
 pub(crate) const SUB_STATE: u8 = 0x01;
+/// Sub-id: master handoff notification `E9 02 side` (0 = left becomes master, 1 = right).
+pub(crate) const SUB_HANDOFF: u8 = 0x02;
+/// `fw_layout` bit telling the host that the right half is the central (dynamic master).
+pub(crate) const FW_LAYOUT_CENTRAL_RIGHT: u8 = 0x80;
 /// Longest subscription a host may ask for.
 pub(crate) const MAX_TTL_SECS: u8 = 120;
 
@@ -47,7 +51,27 @@ pub(crate) fn encode_state(state: LayerState) -> [u8; 32] {
     out[3] = state.default;
     out[4..6].copy_from_slice(&state.mask.to_le_bytes());
     out[6] = state.fw_layout;
+    #[cfg(all(feature = "split", feature = "_ble"))]
+    if !crate::split::role::central_is_left_now() {
+        out[6] |= FW_LAYOUT_CENTRAL_RIGHT;
+    }
     out
+}
+
+/// `E9 02 side`, rest zero.
+pub(crate) fn encode_handoff(new_central_is_left: bool) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[0] = NAMESPACE;
+    out[1] = SUB_HANDOFF;
+    out[2] = (!new_central_is_left) as u8;
+    out
+}
+
+/// Tell the subscribed host that the halves are swapping roles; the sender resets right after.
+pub(crate) fn notify_handoff(new_central_is_left: bool, now_ms: u64) {
+    if let Some(transport) = active_subscriber(now_ms) {
+        try_send_host_reply(transport, encode_handoff(new_central_is_left));
+    }
 }
 
 /// Subscribe or renew for `ttl_secs` (clamped to `MAX_TTL_SECS`); `0` unsubscribes.
@@ -123,6 +147,25 @@ mod tests {
     fn test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn encode_handoff_layout() {
+        assert_eq!(&encode_handoff(false)[..3], &[0xE9, 0x02, 1]);
+        assert_eq!(&encode_handoff(true)[..3], &[0xE9, 0x02, 0]);
+        assert!(encode_handoff(true)[3..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn encode_state_sets_central_right_bit_when_right_is_central() {
+        use crate::split::role::{Role, Side, init};
+        let state = LayerState { active: 1, default: 0, mask: 0b10, fw_layout: 1 };
+        init(Side::Right, Role::Central);
+        assert_eq!(encode_state(state)[6], 1 | FW_LAYOUT_CENTRAL_RIGHT);
+        init(Side::Left, Role::Central);
+        assert_eq!(encode_state(state)[6], 1);
+        init(Side::Right, Role::Peripheral);
+        assert_eq!(encode_state(state)[6], 1, "left is central");
     }
 
     #[test]

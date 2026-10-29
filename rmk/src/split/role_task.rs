@@ -40,6 +40,7 @@ pub async fn run_role_task() -> ! {
             Decision::HandBack => handoff(side != Side::Left, link_up, Role::Peripheral).await,
             Decision::Yield => {
                 info!("role: yield to the peer's master claim");
+                announce_handoff(side != Side::Left).await;
                 reset_into(Role::Peripheral)
             }
         }
@@ -53,11 +54,23 @@ async fn handoff(new_central_is_left: bool, link_up: bool, new_role: Role) -> ! 
         if new_central_is_left { "left" } else { "right" },
         link_up
     );
+    announce_handoff(new_central_is_left).await;
     if link_up {
         ROLE_HANDOFF_TX.signal(new_central_is_left);
         Timer::after_millis(HANDOFF_SETTLE_MS).await;
     }
     reset_into(new_role)
+}
+
+/// Let the layout helper show "switching master" before this half disappears from the host.
+async fn announce_handoff(new_central_is_left: bool) {
+    #[cfg(feature = "layer_notify")]
+    {
+        crate::host::layer_notify::notify_handoff(new_central_is_left, crate::host::layer_notify::now_ms());
+        Timer::after_millis(50).await;
+    }
+    #[cfg(not(feature = "layer_notify"))]
+    let _ = new_central_is_left;
 }
 
 fn vbus_present() -> bool {
