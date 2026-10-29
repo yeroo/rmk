@@ -735,7 +735,7 @@ pub(crate) async fn run_ble_peripheral_manager<
 
 fn active_central_conn_param(profile: SplitLinkProfile) -> RequestedConnParams {
     let interval = match profile {
-        SplitLinkProfile::Keyboard => Duration::from_millis(15),
+        SplitLinkProfile::Keyboard => Duration::from_micros(7_500),
         SplitLinkProfile::Pointing => Duration::from_micros(7_500),
     };
     RequestedConnParams {
@@ -1658,11 +1658,13 @@ mod advertisement_tests {
     }
 
     #[test]
-    fn keyboard_profile_retains_15_ms_cadence() {
+    fn keyboard_profile_uses_7_5_ms_cadence_like_zmk() {
+        // ZMK ran the split link at 7.5 ms (BT_PERIPHERAL_PREF_MIN_INT=6); at 15 ms a right-hand key
+        // could overtake a quick left-hand follow-up and arrive out of order.
         let params = active_central_conn_param(SplitLinkProfile::Keyboard);
 
-        assert_eq!(params.min_connection_interval, Duration::from_millis(15));
-        assert_eq!(params.max_connection_interval, Duration::from_millis(15));
+        assert_eq!(params.min_connection_interval, Duration::from_micros(7_500));
+        assert_eq!(params.max_connection_interval, Duration::from_micros(7_500));
         assert_eq!(params.max_latency, 0);
     }
 
@@ -2045,7 +2047,9 @@ mod advertisement_tests {
             assert!(wake.signaled());
             let target = split_link_target(26, generated, false, 61_000);
             assert_eq!(target, AWAKE_POINTING);
-            assert_eq!(follower.step(target, at(61_000)), SplitLinkStep::Apply);
+            // Keyboard and Pointing now share the 7.5 ms / latency 0 cadence, so the switch needs no
+            // radio update: the follower is already settled on identical parameters.
+            assert_eq!(follower.step(target, at(61_000)), SplitLinkStep::Settled);
             wake.reset();
         }
     }
