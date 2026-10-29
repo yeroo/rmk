@@ -143,6 +143,7 @@ pub(crate) fn rmk_entry_select(
                 };
                 if dynamic.is_some() {
                     tasks.push(quote! { ::rmk::split::role_task::run_role_task() });
+                    tasks.push(quote! { ::rmk::split::ble::central::run_master_claim(&stack) });
                 }
                 split_config.peripheral.iter().enumerate().for_each(|(idx, p)| {
                     let row = p.rows;
@@ -333,7 +334,14 @@ fn transport_setup(communication: &CommunicationConfig, host_ble: bool) -> (Toke
                 #wpm_prelude
                 let mut usb_transport = ::rmk::usb::UsbTransport::new(driver, rmk_config.device_config);
             };
-            (prelude, vec![quote! { usb_transport.run() }, wpm_task])
+            (
+                prelude,
+                vec![
+                    quote! { usb_transport.run() },
+                    quote! { ::rmk::ble::run_ble_stack_only(&stack) },
+                    wpm_task,
+                ],
+            )
         }
         CommunicationConfig::Both(_, _) => {
             let prelude = quote! {

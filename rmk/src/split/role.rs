@@ -159,6 +159,17 @@ pub static ROLE_HANDOFF_TX: Signal<crate::RawMutex, bool> = Signal::new();
 pub static PEER_CLAIM_SEEN: Signal<crate::RawMutex, ()> = Signal::new();
 /// Peripheral role: the split link to the central is up (maintained by `split::ble::peripheral`).
 pub static PERIPHERAL_LINK_UP: AtomicBool = AtomicBool::new(false);
+/// The other half's address as the central knows it; only a claim from this address counts.
+static PEER_ADDRESS: embassy_sync::blocking_mutex::Mutex<crate::RawMutex, core::cell::Cell<Option<[u8; 6]>>> =
+    embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));
+
+pub fn set_peer_address(addr: [u8; 6]) {
+    PEER_ADDRESS.lock(|c| c.set(Some(addr)));
+}
+
+pub fn peer_address() -> Option<[u8; 6]> {
+    PEER_ADDRESS.lock(|c| c.get())
+}
 
 pub fn init(side: Side, role: Role) {
     CURRENT_SIDE_IS_LEFT.store(side == Side::Left, Ordering::Relaxed);

@@ -615,6 +615,14 @@ where
     }
 }
 
+/// Drive the BLE stack for a split central that has no Bluetooth host transport (the dynamic
+/// master's right half): the split link still needs the runner and the scan handler.
+pub async fn run_ble_stack_only<'b, 's: 'b, C: Controller + ControllerCmdAsync<LeSetPhy>>(
+    stack: &'b Stack<'s, C, DefaultPacketPool>,
+) {
+    ble_task(stack.runner()).await
+}
+
 /// This is a background task that is required to run forever alongside any other BLE tasks.
 pub(crate) async fn ble_task<C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool>(
     mut runner: Runner<'_, C, P>,

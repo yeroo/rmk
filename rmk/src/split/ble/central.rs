@@ -76,6 +76,12 @@ const POINTING_LINK_HOLD: Duration = Duration::from_secs(30);
 
 const SPLIT_SERVICE_UUID: [u8; 16] = [70, 153, 101, 152, 54, 53, 10, 191, 7, 75, 229, 24, 170, 251, 213, 77];
 const SPLIT_COMPANY_ID: u16 = 0xe118;
+/// Marks a master-claim advertisement (dynamic master half); follows the company id.
+pub(crate) const CLAIM_MAGIC: [u8; 4] = *b"OP36";
+/// How long a claim burst advertises, and how long the default central listens for one
+/// between two connect attempts.
+const CLAIM_BURST_MS: u64 = 1_000;
+const CLAIM_SCAN_MS: u64 = 600;
 const VALIDATED_PEER_FAILURE_LIMIT: u8 = 3;
 #[cfg(feature = "rtt_diag")]
 const SPLIT_RSSI_INTERVAL: Duration = Duration::from_secs(1);
@@ -490,6 +496,14 @@ pub(crate) struct ScanHandler {}
 impl EventHandler for ScanHandler {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
         while let Some(Ok(report)) = it.next() {
+            if parse_claim(report.data).is_some() {
+                // Dynamic master: the other half (and only it) says it is the master now.
+                if crate::split::role::peer_address() == Some(report.addr.into_inner()) {
+                    info!("Master claim from the other half");
+                    crate::split::role::PEER_CLAIM_SEEN.signal(());
+                }
+                continue;
+            }
             if let Some(peripheral_id) = split_peripheral_id_from_advertisement(report.data)
                 .or_else(|| legacy_split_peripheral_id_from_advertisement(report.data))
             {
@@ -513,6 +527,128 @@ fn legacy_split_peripheral_id_from_advertisement(data: &[u8]) -> Option<u8> {
         Some(data[25])
     } else {
         None
+    }
+}
+
+/// Non-connectable advertisement a non-default central sends while it has no peripheral link:
+/// `Flags` + manufacturer data `[company][OP36][product id][side]`. Returns the encoded length.
+pub(crate) fn encode_claim(side: crate::split::role::Side, out: &mut [u8; 31]) -> usize {
+    let payload = [
+        CLAIM_MAGIC[0],
+        CLAIM_MAGIC[1],
+        CLAIM_MAGIC[2],
+        CLAIM_MAGIC[3],
+        (crate::SPLIT_PRODUCT_ID & 0xff) as u8,
+        (crate::SPLIT_PRODUCT_ID >> 8) as u8,
+        (side == crate::split::role::Side::Right) as u8,
+    ];
+    AdStructure::encode_slice(
+        &[
+            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::ManufacturerSpecificData {
+                company_identifier: SPLIT_COMPANY_ID,
+                payload: &payload,
+            },
+        ],
+        &mut out[..],
+    )
+    .unwrap_or(0)
+}
+
+/// The side that claims mastership in `data`, if `data` is a claim for this keyboard model.
+pub(crate) fn parse_claim(data: &[u8]) -> Option<crate::split::role::Side> {
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let len = data[offset] as usize;
+        if len == 0 {
+            break;
+        }
+        let end = offset + 1 + len;
+        if end > data.len() {
+            break;
+        }
+        let ad_type = data[offset + 1];
+        let payload = &data[offset + 2..end];
+        if ad_type == 0xff
+            && payload.len() == 9
+            && u16::from_le_bytes([payload[0], payload[1]]) == SPLIT_COMPANY_ID
+            && payload[2..6] == CLAIM_MAGIC
+            && u16::from_le_bytes([payload[6], payload[7]]) == crate::SPLIT_PRODUCT_ID
+        {
+            return Some(if payload[8] == 1 {
+                crate::split::role::Side::Right
+            } else {
+                crate::split::role::Side::Left
+            });
+        }
+        offset = end;
+    }
+    None
+}
+
+/// Dynamic master, non-default central (the right half on a USB host): while no peripheral is
+/// linked, advertise the master claim in bursts so a default central that still thinks it is
+/// the master yields (`role_task`). Idle on every other half/role.
+pub async fn run_master_claim<'b, 's: 'b, C: Controller>(stack: &'b Stack<'s, C, DefaultPacketPool>) {
+    use crate::split::role::{Role, current_role, current_side, default_role};
+    let side = current_side();
+    if current_role() != Role::Central || default_role(side) == Role::Central {
+        core::future::pending::<()>().await;
+    }
+    wait_for_stack_started().await;
+    let mut adv_data = [0u8; 31];
+    let n = encode_claim(side, &mut adv_data);
+    let params = AdvertisementParameters {
+        interval_min: Duration::from_millis(100),
+        interval_max: Duration::from_millis(100),
+        ..Default::default()
+    };
+    loop {
+        if all_peripherals_connected() {
+            Timer::after_millis(500).await;
+            continue;
+        }
+        let mut peripheral = stack.peripheral();
+        match peripheral
+            .advertise(
+                &params,
+                Advertisement::NonconnectableNonscannableUndirected {
+                    adv_data: &adv_data[..n],
+                },
+            )
+            .await
+        {
+            // Dropping the advertiser stops the burst.
+            Ok(_advertiser) => Timer::after_millis(CLAIM_BURST_MS).await,
+            Err(_) => {
+                warn!("Master claim advertising failed");
+                Timer::after_millis(1_000).await;
+            }
+        }
+        Timer::after_millis(500).await;
+    }
+}
+
+/// Dynamic master, default central: listen briefly for the other half's master claim between
+/// two connect attempts (connecting uses the initiator, which delivers no advertising reports).
+async fn claim_scan_window<C: Controller + ControllerCmdSync<LeSetScanParams>>(
+    central: &mut Central<'_, C, DefaultPacketPool>,
+) {
+    use crate::split::role::{Role, current_role, current_side, default_role};
+    if current_role() != Role::Central || default_role(current_side()) != Role::Central {
+        return;
+    }
+    let Ok(_guard) = SCANNING_MUTEX.try_lock() else { return };
+    let mut scanner = Scanner::new(central);
+    let timing = split_scan_timing();
+    let config = ScanConfig {
+        active: false,
+        interval: timing.interval,
+        window: timing.window,
+        ..Default::default()
+    };
+    if let Ok(_session) = scanner.scan(&config).await {
+        Timer::after_millis(CLAIM_SCAN_MS).await;
     }
 }
 
@@ -656,6 +792,7 @@ pub(crate) async fn run_ble_peripheral_manager<
             embassy_time::Timer::after_millis(500).await;
         };
         info!("Peripheral peer address: {:?}", address);
+        crate::split::role::set_peer_address(address.addr.into_inner());
 
         let mut central = stack.central();
         let active_profile = effective_split_link_profile(peri_id, profile);
@@ -728,6 +865,7 @@ pub(crate) async fn run_ble_peripheral_manager<
                 handle_failed_peer(peri_id, addrs, &mut peer_retry_state).await;
             }
         }
+        claim_scan_window(&mut central).await;
         // Reconnect after 500ms
         embassy_time::Timer::after_millis(500).await;
     }
@@ -1537,6 +1675,33 @@ pub fn pointing_quiet_period_remaining(quiet_period: Duration) -> Duration {
 #[cfg(test)]
 mod advertisement_tests {
     use super::*;
+    use crate::split::role::Side;
+
+    #[test]
+    fn master_claim_round_trips_through_the_advertisement() {
+        let mut buf = [0u8; 31];
+        let n = encode_claim(Side::Right, &mut buf);
+        assert_eq!(parse_claim(&buf[..n]), Some(Side::Right));
+        let n = encode_claim(Side::Left, &mut buf);
+        assert_eq!(parse_claim(&buf[..n]), Some(Side::Left));
+    }
+
+    #[test]
+    fn parse_claim_accepts_only_this_product_and_magic() {
+        let mut buf = [0u8; 31];
+        let n = encode_claim(Side::Right, &mut buf);
+        let mut wrong_pid = buf;
+        wrong_pid[n - 3] ^= 0xFF; // product id low byte sits right before the side byte
+        assert_eq!(parse_claim(&wrong_pid[..n]), None);
+        let mut wrong_magic = buf;
+        let magic_at = buf[..n].windows(4).position(|w| w == CLAIM_MAGIC).unwrap();
+        wrong_magic[magic_at] = b'X';
+        assert_eq!(parse_claim(&wrong_magic[..n]), None);
+        assert_eq!(parse_claim(&buf[..n - 1]), None, "truncated");
+        // The split peripheral's own advertisement is not a claim.
+        let peripheral_adv = [0x02, 0x01, 0x06, 0x06, 0xff, 0x18, 0xe1, 0x36, 0x00, 0x00];
+        assert_eq!(parse_claim(&peripheral_adv), None);
+    }
 
     #[test]
     fn uncommitted_peer_is_forgotten_after_first_failure() {
