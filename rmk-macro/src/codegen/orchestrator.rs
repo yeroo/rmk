@@ -25,6 +25,8 @@ use super::split::central::expand_split_central_config;
 use super::watchdog::expand_watchdog_init;
 
 /// Parse keyboard mod and generate a valid RMK main function with all needed code
+use crate::codegen::dynamic_role::{DynSide, central_hardware_view, strip_bind_interrupts, wrap_role_module};
+
 pub(crate) fn parse_keyboard_mod(item_mod: syn::ItemMod) -> TokenStream2 {
     let rmk_features = get_rmk_features();
 
@@ -216,9 +218,88 @@ fn expand_main(
     item_mod: syn::ItemMod,
     rmk_features: &Option<Vec<String>>,
 ) -> TokenStream2 {
+    let main_function_sig = if hardware.chip.series == ChipSeries::Esp32 {
+        quote! {
+            #[::esp_rtos::main]
+            async fn main(_s: ::embassy_executor::Spawner)
+        }
+    } else {
+        quote! {
+            #[::embassy_executor::main]
+            async fn main(spawner: ::embassy_executor::Spawner)
+        }
+    };
+    let (prelude, body) = expand_main_parts(host, hardware, behavior, layout, item_mod, rmk_features, None);
+    quote! {
+        #prelude
+        #main_function_sig {
+            #body
+        }
+    }
+}
+
+/// Dual-role central: `pub mod as_central { .. pub async fn run(spawner) }` for the half `side`
+/// (see `dynamic_role`). The interrupt vector is shared and comes from `rmk_dynamic_main!`.
+pub(crate) fn parse_keyboard_mod_dynamic(side: DynSide, item_mod: syn::ItemMod) -> TokenStream2 {
+    let rmk_features = get_rmk_features();
+    let keyboard_config = read_keyboard_toml_config();
+    let identity = keyboard_config
+        .identity()
+        .expect("failed to resolve identity config");
+    let host = keyboard_config.host();
+    let hardware = central_hardware_view(
+        &keyboard_config
+            .hardware()
+            .expect("failed to resolve hardware config"),
+        side,
+    );
+    let behavior = keyboard_config
+        .behavior()
+        .expect("failed to resolve behavior config");
+    let layout = keyboard_config
+        .layout()
+        .expect("failed to resolve layout config");
+    let imports_and_statics =
+        expand_imports_and_constants(&identity, &host, &hardware, &behavior, &layout);
+    let (prelude, body) = expand_main_parts(
+        &host,
+        &hardware,
+        &behavior,
+        &layout,
+        item_mod,
+        &rmk_features,
+        Some(side),
+    );
+    wrap_role_module(
+        "as_central",
+        quote! {
+            #imports_and_statics
+            #prelude
+        },
+        body,
+    )
+}
+
+/// `(items before main, body of main)`; `dynamic` selects the dual-role variant (shared
+/// interrupt vector, role task, USB-only host transport on the right half).
+#[allow(clippy::too_many_arguments)]
+fn expand_main_parts(
+    host: &Host,
+    hardware: &Hardware,
+    behavior: &Behavior,
+    layout: &Layout,
+    item_mod: syn::ItemMod,
+    rmk_features: &Option<Vec<String>>,
+    dynamic: Option<DynSide>,
+) -> (TokenStream2, TokenStream2) {
     // Expand components of main function
     let imports = expand_custom_imports(&item_mod);
     let bind_interrupt = expand_bind_interrupt(hardware, &item_mod);
+    let bind_interrupt = if dynamic.is_some() {
+        strip_bind_interrupts(bind_interrupt)
+    } else {
+        bind_interrupt
+    };
     let chip_init = expand_chip_init(hardware, None, &item_mod);
     let usb_init = expand_usb_init(hardware, &item_mod);
     let flash_init = expand_flash_init(hardware);
@@ -295,6 +376,7 @@ fn expand_main(
         processors,
         registered_processors,
         watchdog_task,
+        dynamic,
     );
 
     let vial_config = if host.vial_enabled {
@@ -326,24 +408,12 @@ fn expand_main(
         }
     };
 
-    let main_function_sig = if hardware.chip.series == ChipSeries::Esp32 {
-        quote! {
-            #[::esp_rtos::main]
-            async fn main(_s: ::embassy_executor::Spawner)
-        }
-    } else {
-        quote! {
-            #[::embassy_executor::main]
-            async fn main(spawner: ::embassy_executor::Spawner)
-        }
-    };
-
-    quote! {
+    let prelude = quote! {
         #imports
 
         #bind_interrupt
-
-        #main_function_sig {
+    };
+    let body = quote! {
             // Initialize peripherals as `p`
             #chip_init
 
@@ -400,8 +470,8 @@ fn expand_main(
 
             // Start
             #run_rmk
-        }
-    }
+    };
+    (prelude, body)
 }
 
 /// Generate `set_firmware_update_data` calls for each peripheral that has a

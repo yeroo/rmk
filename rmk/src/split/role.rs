@@ -157,6 +157,8 @@ pub static LOCAL_USB_CONFIGURED: AtomicBool = AtomicBool::new(false);
 pub static ROLE_HANDOFF_TX: Signal<crate::RawMutex, bool> = Signal::new();
 /// A master-claim advertisement from the stored peer address was seen (central role).
 pub static PEER_CLAIM_SEEN: Signal<crate::RawMutex, ()> = Signal::new();
+/// Peripheral role: the split link to the central is up (maintained by `split::ble::peripheral`).
+pub static PERIPHERAL_LINK_UP: AtomicBool = AtomicBool::new(false);
 
 pub fn init(side: Side, role: Role) {
     CURRENT_SIDE_IS_LEFT.store(side == Side::Left, Ordering::Relaxed);

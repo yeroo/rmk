@@ -543,11 +543,15 @@ impl Handler for UsbDeviceHandler {
         } else {
             info!("Device disabled");
             set_usb_state_and_notify(UsbState::Disabled);
+            #[cfg(all(feature = "split", feature = "_ble"))]
+            crate::split::role::LOCAL_USB_CONFIGURED.store(false, core::sync::atomic::Ordering::Relaxed);
         }
     }
 
     fn reset(&mut self) {
         info!("Bus reset, the Vbus current limit is 100mA");
+        #[cfg(all(feature = "split", feature = "_ble"))]
+        crate::split::role::LOCAL_USB_CONFIGURED.store(false, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn addressed(&mut self, addr: u8) {
@@ -555,6 +559,10 @@ impl Handler for UsbDeviceHandler {
     }
 
     fn configured(&mut self, configured: bool) {
+        // The dynamic master half decides on this half's own enumeration, not on the synced
+        // connection status a peripheral receives from its central.
+        #[cfg(all(feature = "split", feature = "_ble"))]
+        crate::split::role::LOCAL_USB_CONFIGURED.store(configured, core::sync::atomic::Ordering::Relaxed);
         if configured {
             set_usb_state_and_notify(UsbState::Configured);
             info!("Device configured, it may now draw up to the configured current from Vbus.")

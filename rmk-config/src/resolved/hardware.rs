@@ -15,6 +15,7 @@ pub use crate::{
 };
 
 /// Resolved storage hardware config
+#[derive(Clone)]
 pub struct Storage {
     pub start_addr: usize,
     pub num_sectors: u8,
@@ -24,6 +25,7 @@ pub struct Storage {
 }
 
 /// Resolved DFU partition config
+#[derive(Clone)]
 pub struct DfuConfig {
     pub state_offset: u32,
     pub state_size: u32,
@@ -35,6 +37,7 @@ pub struct DfuConfig {
 }
 
 /// Complete hardware configuration for init code generation.
+#[derive(Clone)]
 pub struct Hardware {
     pub chip: ChipModel,
     pub chip_config: ChipConfig,

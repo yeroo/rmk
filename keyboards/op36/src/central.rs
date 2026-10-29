@@ -11,9 +11,12 @@ mod layer_names;
 
 const DEFAULT_LAYER_NAMES: [&str; 16] = default_layer_names::STANDARD_NO_MOUSE;
 
-use rmk::macros::rmk_central;
+use rmk::macros::{rmk_central, rmk_dynamic_main, rmk_peripheral};
 
-#[rmk_central]
+// Dual-role firmware for the left half: the half that a USB host enumerates is the master
+// (`rmk::split::role`); with no cable anywhere the left half is the master over Bluetooth.
+
+#[rmk_central(dynamic_role = "left")]
 mod keyboard_central {
     #[register_processor(event)]
     fn battery() -> crate::battery_nrf::Op36Battery {
@@ -25,3 +28,13 @@ mod keyboard_central {
         ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys::new()
     }
 }
+
+#[rmk_peripheral(id = 0, dynamic_role = "left")]
+mod keyboard_peripheral {
+    #[register_processor(event)]
+    fn battery() -> crate::battery_nrf::Op36Battery {
+        crate::battery_nrf::Op36Battery::new(p.SAADC, p.P0_31)
+    }
+}
+
+rmk_dynamic_main!("left");

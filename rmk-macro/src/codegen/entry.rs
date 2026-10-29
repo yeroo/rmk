@@ -1,5 +1,7 @@
 use darling::FromMeta;
 use proc_macro2::TokenStream as TokenStream2;
+
+use crate::codegen::dynamic_role::DynSide;
 use quote::{format_ident, quote};
 use rmk_config::resolved::hardware::{BoardConfig, CommunicationConfig};
 use rmk_config::resolved::{Behavior, Hardware, Host};
@@ -8,6 +10,7 @@ use syn::{ItemFn, ItemMod};
 use super::override_helper::Overwritten;
 use crate::codegen::feature::{get_rmk_features, is_feature_enabled};
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn expand_rmk_entry(
     hardware: &Hardware,
@@ -18,6 +21,7 @@ pub(crate) fn expand_rmk_entry(
     processors: Vec<TokenStream2>,
     registered_processors: Vec<TokenStream2>,
     watchdog_task: Option<TokenStream2>,
+    dynamic: Option<DynSide>,
 ) -> TokenStream2 {
     // If there is a function with `#[Overwritten(entry)]`, override the entry
     if let Some((_, items)) = &item_mod.content {
@@ -40,6 +44,7 @@ pub(crate) fn expand_rmk_entry(
                 processors,
                 registered_processors,
                 watchdog_task,
+                dynamic,
             ))
     } else {
         rmk_entry_select(
@@ -50,6 +55,7 @@ pub(crate) fn expand_rmk_entry(
             processors,
             registered_processors,
             watchdog_task,
+            dynamic,
         )
     }
 }
@@ -61,6 +67,7 @@ fn override_rmk_entry(item_fn: &ItemFn) -> TokenStream2 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rmk_entry_select(
     hardware: &Hardware,
     host: &Host,
@@ -69,6 +76,7 @@ pub(crate) fn rmk_entry_select(
     processors: Vec<TokenStream2>,
     registered_processors: Vec<TokenStream2>,
     watchdog_task: Option<TokenStream2>,
+    dynamic: Option<DynSide>,
 ) -> TokenStream2 {
     let auto_mouse_layer_enabled = !behavior.auto_mouse_layer.is_empty();
     let auto_mouse_layer_prelude = auto_mouse_layer_enabled.then(|| {
@@ -112,7 +120,8 @@ pub(crate) fn rmk_entry_select(
         .get_ble_config()
         .and_then(|config| config.use_2m_phy)
         .unwrap_or(true);
-    let (transport_prelude, transport_tasks) = transport_setup(communication);
+    // The right half as central is USB-only towards hosts: no Bluetooth advertising, no bond.
+    let (transport_prelude, transport_tasks) = transport_setup(communication, dynamic != Some(DynSide::Right));
 
     let entry = match board {
         BoardConfig::Split(split_config) => {
@@ -132,6 +141,9 @@ pub(crate) fn rmk_entry_select(
                 if !processors.is_empty() {
                     tasks.push(processors_task);
                 };
+                if dynamic.is_some() {
+                    tasks.push(quote! { ::rmk::split::role_task::run_role_task() });
+                }
                 split_config.peripheral.iter().enumerate().for_each(|(idx, p)| {
                     let row = p.rows;
                     let col = p.cols;
@@ -284,7 +296,8 @@ pub(crate) fn rmk_entry_unibody(
 /// active communication config. The prelude must be emitted before the join so
 /// that `transport.run()` can borrow each transport for the lifetime of the
 /// program.
-fn transport_setup(communication: &CommunicationConfig) -> (TokenStream2, Vec<TokenStream2>) {
+/// `host_ble = false` keeps the BLE stack for the split link but starts no host transport over it.
+fn transport_setup(communication: &CommunicationConfig, host_ble: bool) -> (TokenStream2, Vec<TokenStream2>) {
     let use_2m_phy = communication
         .get_ble_config()
         .and_then(|config| config.use_2m_phy)
@@ -312,6 +325,15 @@ fn transport_setup(communication: &CommunicationConfig) -> (TokenStream2, Vec<To
                 ).await;
             };
             (prelude, vec![quote! { ble_transport.run() }, wpm_task])
+        }
+        CommunicationConfig::Both(_, _) if !host_ble => {
+            // Dual-role right half as central: hosts see USB only; the BLE stack still runs
+            // for the split link.
+            let prelude = quote! {
+                #wpm_prelude
+                let mut usb_transport = ::rmk::usb::UsbTransport::new(driver, rmk_config.device_config);
+            };
+            (prelude, vec![quote! { usb_transport.run() }, wpm_task])
         }
         CommunicationConfig::Both(_, _) => {
             let prelude = quote! {

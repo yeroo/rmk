@@ -231,7 +231,7 @@ fn required_peripheral_mask() -> u32 {
     }
 }
 
-fn all_peripherals_connected() -> bool {
+pub(crate) fn all_peripherals_connected() -> bool {
     CONNECTED_PERIPHERALS.lock(Cell::get) & required_peripheral_mask() == required_peripheral_mask()
 }
 

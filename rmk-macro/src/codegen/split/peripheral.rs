@@ -9,6 +9,8 @@ use syn::ItemMod;
 
 use super::central::expand_serial_init;
 use crate::codegen::chip::bind_interrupt::find_extern_irqs;
+use crate::codegen::chip::comm::usb_config_default;
+use crate::codegen::dynamic_role::{DynSide, peripheral_hardware_view, strip_bind_interrupts, wrap_role_module};
 use crate::codegen::chip::chip_init::expand_chip_init;
 use crate::codegen::chip::flash::expand_flash_init;
 use crate::codegen::chip::gpio::expand_output_initialization;
@@ -36,6 +38,16 @@ pub(crate) fn parse_split_peripheral_mod(
     _attr: proc_macro::TokenStream,
     item_mod: ItemMod,
 ) -> TokenStream2 {
+    parse_split_peripheral_mod_with(id, item_mod, None)
+}
+
+/// Dual-role peripheral: `pub mod as_peripheral { .. pub async fn run(spawner) }` for the half
+/// `side`; it also runs the USB device so a host enumeration can be observed (`role_task`).
+pub(crate) fn parse_split_peripheral_mod_dynamic(id: usize, side: DynSide, item_mod: ItemMod) -> TokenStream2 {
+    parse_split_peripheral_mod_with(id, item_mod, Some(side))
+}
+
+fn parse_split_peripheral_mod_with(id: usize, item_mod: ItemMod, dynamic: Option<DynSide>) -> TokenStream2 {
     let rmk_features = get_rmk_features();
     if !is_feature_enabled(&rmk_features, "split") {
         panic!("\"split\" feature of RMK should be enabled");
@@ -45,13 +57,18 @@ pub(crate) fn parse_split_peripheral_mod(
     let hardware = toml_config
         .hardware()
         .expect("failed to resolve hardware config");
+    let hardware = match dynamic {
+        Some(side) => peripheral_hardware_view(&hardware, side),
+        None => hardware,
+    };
     let identity = toml_config
         .identity()
         .expect("failed to resolve identity config");
 
     let dfu_enabled =
         is_feature_enabled(&rmk_features, "dfu_rp") || is_feature_enabled(&rmk_features, "dfu_nrf");
-    let device_config = if dfu_enabled {
+    // The dual-role peripheral enumerates as the keyboard too, so it needs the device config.
+    let device_config = if dfu_enabled || dynamic.is_some() {
         let vid = identity.vendor_id;
         let pid = identity.product_id;
         let manufacturer = &identity.manufacturer;
@@ -76,7 +93,7 @@ pub(crate) fn parse_split_peripheral_mod(
     };
 
     let extern_irqs = find_extern_irqs(&item_mod);
-    let main_function = expand_split_peripheral(id, &identity, &hardware, item_mod, &rmk_features);
+    let main_function = expand_split_peripheral(id, &identity, &hardware, item_mod, &rmk_features, dynamic);
 
     let bind_interrupts = expand_bind_interrupt_for_split_peripheral(
         &hardware.chip,
@@ -87,6 +104,18 @@ pub(crate) fn parse_split_peripheral_mod(
     );
 
     let chip = &hardware.chip;
+    if dynamic.is_some() {
+        // Shared interrupt vector and logger come from `rmk_dynamic_main!` / `as_central`.
+        let helpers = strip_bind_interrupts(bind_interrupts);
+        return wrap_role_module(
+            "as_peripheral",
+            quote! {
+                #device_config
+                #helpers
+            },
+            main_function,
+        );
+    }
     let main_function_sig = if chip.series == ChipSeries::Esp32 {
         quote! {
             use esp_alloc as _;
@@ -328,6 +357,7 @@ fn expand_split_peripheral(
     hardware: &Hardware,
     item_mod: ItemMod,
     rmk_features: &Option<Vec<String>>,
+    dynamic: Option<DynSide>,
 ) -> TokenStream2 {
     // Check whether keyboard.toml contains split section
     let split_config = match &hardware.board {
@@ -367,9 +397,19 @@ fn expand_split_peripheral(
         chip_init.extend(quote! { ::rmk::dfu::mark_booted(); });
     }
 
+    // Dual-role: run the USB device so the role task sees a host enumerate this half.
+    let mut extra_tasks: Vec<TokenStream2> = Vec::new();
+    if dynamic.is_some() {
+        chip_init.extend(usb_config_default(hardware));
+        extra_tasks.push(quote! {
+            ::rmk::usb::UsbTransport::new(driver, KEYBOARD_DEVICE_CONFIG).run()
+        });
+        extra_tasks.push(quote! { ::rmk::split::role_task::run_role_task() });
+    }
+
     // Initialize USB driver for DFU on the peripheral side
     // so it can be firmware-updated via USB.
-    let dfu_task_future = if dfu_enabled {
+    let dfu_task_future = if dfu_enabled && dynamic.is_none() {
         let usb_init = match hardware.chip.series {
             ChipSeries::Nrf52 => quote! {
                 let driver = ::embassy_nrf::usb::Driver::new(p.USBD, Irqs, ::embassy_nrf::usb::vbus_detect::HardwareVbusDetect::new(Irqs));
@@ -499,7 +539,7 @@ fn expand_split_peripheral(
 
     let (watchdog_init, watchdog_task) = expand_watchdog_init(hardware);
 
-    let runnable_import = if !registered_processors.is_empty() || watchdog_task.is_some() {
+    let runnable_import = if !registered_processors.is_empty() || watchdog_task.is_some() || dynamic.is_some() {
         quote! { use ::rmk::core_traits::Runnable; }
     } else {
         quote! {}
@@ -515,6 +555,7 @@ fn expand_split_peripheral(
         registered_processors,
         watchdog_task,
         dfu_task_future,
+        extra_tasks,
     );
 
     quote! {
@@ -543,6 +584,7 @@ fn expand_split_peripheral_entry(
     registered_processors: Vec<TokenStream2>,
     watchdog_task: Option<TokenStream2>,
     dfu_task_future: Option<TokenStream2>,
+    extra_tasks: Vec<TokenStream2>,
 ) -> TokenStream2 {
     // Add matrix to devices, and run all devices
     let mut devs = devices.clone();
@@ -587,6 +629,7 @@ fn expand_split_peripheral_entry(
         if let Some(t) = &dfu_task_future {
             tasks.push(t.clone());
         }
+        tasks.extend(extra_tasks);
         let run_rmk_peripheral = join_all_tasks(tasks);
         quote! {
             #run_rmk_peripheral

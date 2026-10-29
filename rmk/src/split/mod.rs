@@ -10,6 +10,9 @@ use crate::event::{KeyboardEvent, PointingEvent};
 
 #[cfg(feature = "_ble")]
 pub mod role;
+#[cfg(feature = "_ble")]
+pub mod role_task;
+#[cfg(feature = "_ble")]
 pub(crate) mod battery;
 #[cfg(feature = "_ble")]
 pub mod ble;
