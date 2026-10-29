@@ -125,6 +125,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         SplitMessage::Pointing(event)
                     },
                     with_feature("_ble"): e = battery_sub.next_event().fuse() => SplitMessage::BatteryStatus(e),
+                    new_left = crate::split::role::ROLE_HANDOFF_TX.wait().fuse() => SplitMessage::RoleHandoff { new_central_is_left: new_left },
                 }
             };
 
@@ -183,6 +184,9 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         #[cfg(feature = "display")]
                         SplitMessage::SleepState(sleeping) => {
                             publish_event(SleepStateEvent::new(sleeping));
+                        }
+                        SplitMessage::RoleHandoff { new_central_is_left } => {
+                            crate::split::role::apply_handoff_received(new_central_is_left).await
                         }
                         // --- dfu_split: firmware update handlers ---
                         #[cfg(feature = "dfu_split")]

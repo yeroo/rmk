@@ -123,6 +123,9 @@ pub(crate) enum SplitMessage {
     /// Sleep state from central to peripheral
     #[cfg(feature = "display")]
     SleepState(bool),
+    /// Dynamic master: the sender announces who becomes central; both halves reset into
+    /// their new roles (`split::role`). Kept last so earlier discriminants never move.
+    RoleHandoff { new_central_is_left: bool },
 }
 
 // -----------------------------------------------------------------------

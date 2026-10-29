@@ -618,7 +618,7 @@ impl<'a> VialService<'a> {
                             self.ctx.peripheral_battery_status(0),
                             self.ctx.peripheral_battery_status(1),
                             crate::SPLIT_PERIPHERALS_NUM,
-                            crate::SPLIT_CENTRAL_IS_LEFT,
+                            crate::split::role::central_is_left_now(),
                         );
                         if let Some(level) = battery_level_byte(left) {
                             report.input_data[4] |= 0x01;

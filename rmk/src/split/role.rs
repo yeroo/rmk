@@ -6,6 +6,10 @@
 //! sees its peer claim mastership over the air yields. Everything here is host-testable; the
 //! device-side plumbing (reset register, signals) lives in `role_task`.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use embassy_sync::signal::Signal;
+
 /// The role a half runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -116,6 +120,95 @@ impl RoleMachine {
     }
 }
 
+/// The role this half takes when the other half announces who the new central is.
+pub fn role_after_handoff(side: Side, new_central_is_left: bool) -> Role {
+    match (side, new_central_is_left) {
+        (Side::Left, true) | (Side::Right, false) => Role::Central,
+        _ => Role::Peripheral,
+    }
+}
+
+/// `GPREGRET2` value that survives a soft reset and selects the role at the next boot.
+/// (`GPREGRET` belongs to the Adafruit bootloader: `0x57` = enter DFU.)
+pub fn magic_for(role: Role) -> u8 {
+    match role {
+        Role::Central => 0xC3,
+        Role::Peripheral => 0xA5,
+    }
+}
+
+pub fn role_from_magic(magic: u8) -> Option<Role> {
+    match magic {
+        0xC3 => Some(Role::Central),
+        0xA5 => Some(Role::Peripheral),
+        _ => None,
+    }
+}
+
+// ---- runtime registry (set once at boot) ----
+
+static CURRENT_SIDE_IS_LEFT: AtomicBool = AtomicBool::new(true);
+static CURRENT_ROLE_IS_CENTRAL: AtomicBool = AtomicBool::new(true);
+/// This half's own USB device reached `Configured`; maintained by the USB device handler.
+/// Distinct from `state::current_usb_state()`, which a peripheral overwrites with the
+/// central's synced status.
+pub static LOCAL_USB_CONFIGURED: AtomicBool = AtomicBool::new(false);
+/// Ask the split loop to send `RoleHandoff { new_central_is_left }` to the other half.
+pub static ROLE_HANDOFF_TX: Signal<crate::RawMutex, bool> = Signal::new();
+/// A master-claim advertisement from the stored peer address was seen (central role).
+pub static PEER_CLAIM_SEEN: Signal<crate::RawMutex, ()> = Signal::new();
+
+pub fn init(side: Side, role: Role) {
+    CURRENT_SIDE_IS_LEFT.store(side == Side::Left, Ordering::Relaxed);
+    CURRENT_ROLE_IS_CENTRAL.store(role == Role::Central, Ordering::Relaxed);
+}
+
+pub fn current_side() -> Side {
+    if CURRENT_SIDE_IS_LEFT.load(Ordering::Relaxed) { Side::Left } else { Side::Right }
+}
+
+pub fn current_role() -> Role {
+    if CURRENT_ROLE_IS_CENTRAL.load(Ordering::Relaxed) { Role::Central } else { Role::Peripheral }
+}
+
+/// Whether the left half is the central right now (replaces the build-time constant).
+pub fn central_is_left_now() -> bool {
+    central_is_left(current_side(), current_role())
+}
+
+/// The role hint left in `GPREGRET2` by the previous run, if any.
+pub fn read_boot_role() -> Option<Role> {
+    #[cfg(feature = "_nrf_ble")]
+    {
+        role_from_magic(embassy_nrf::pac::POWER.gpregret2().read().0 as u8)
+    }
+    #[cfg(not(feature = "_nrf_ble"))]
+    {
+        None
+    }
+}
+
+/// Leave the role hint for the next boot and reset the chip.
+pub fn reset_into(role: Role) -> ! {
+    info!("role: resetting into {:?}", role);
+    #[cfg(feature = "_nrf_ble")]
+    embassy_nrf::pac::POWER
+        .gpregret2()
+        .write_value(embassy_nrf::pac::power::regs::Gpregret2(u32::from(magic_for(role))));
+    #[cfg(all(target_arch = "arm", target_os = "none", any(target_abi = "eabi", target_abi = "eabihf")))]
+    cortex_m::peripheral::SCB::sys_reset();
+    #[cfg(not(all(target_arch = "arm", target_os = "none", any(target_abi = "eabi", target_abi = "eabihf"))))]
+    panic!("reset_into is device-only");
+}
+
+/// The other half announced the new central: become what that leaves for this side.
+pub async fn apply_handoff_received(new_central_is_left: bool) -> ! {
+    let role = role_after_handoff(current_side(), new_central_is_left);
+    info!("role: handoff received, new central is {}", if new_central_is_left { "left" } else { "right" });
+    embassy_time::Timer::after_millis(HANDOFF_SETTLE_MS).await;
+    reset_into(role)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +223,24 @@ mod tests {
             peer_claim_seen: false,
             ble_host_connected: false,
         }
+    }
+
+    #[test]
+    fn handoff_received_maps_to_own_role() {
+        assert_eq!(role_after_handoff(Side::Left, true), Role::Central);
+        assert_eq!(role_after_handoff(Side::Left, false), Role::Peripheral);
+        assert_eq!(role_after_handoff(Side::Right, true), Role::Peripheral);
+        assert_eq!(role_after_handoff(Side::Right, false), Role::Central);
+    }
+
+    #[test]
+    fn boot_role_magic_round_trips() {
+        assert_eq!(role_from_magic(magic_for(Role::Central)), Some(Role::Central));
+        assert_eq!(role_from_magic(magic_for(Role::Peripheral)), Some(Role::Peripheral));
+        assert_eq!(magic_for(Role::Central), 0xC3);
+        assert_eq!(magic_for(Role::Peripheral), 0xA5);
+        assert_eq!(role_from_magic(0x00), None);
+        assert_eq!(role_from_magic(0x57), None, "the bootloader's DFU magic is not a role");
     }
 
     #[test]
