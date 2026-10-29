@@ -11,7 +11,6 @@ use super::override_helper::Overwritten;
 use crate::codegen::feature::{get_rmk_features, is_feature_enabled};
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn expand_rmk_entry(
     hardware: &Hardware,
     host: &Host,

@@ -212,7 +212,7 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
                     }
 
                     publish_event(CentralConnectedEvent { connected: true });
-                    crate::split::role::PERIPHERAL_LINK_UP.store(true, core::sync::atomic::Ordering::Relaxed);
+                    crate::split::role::set_peripheral_link(true);
                     publish_peripheral_split_state(id, SplitConnectionState::Connected);
                     if !central_saved || central_addr != Some(new_addr) {
                         info!("Saving validated split central address to storage");
@@ -239,7 +239,7 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
                         }
                     }
                     info!("Disconnected from the split central");
-                    crate::split::role::PERIPHERAL_LINK_UP.store(false, core::sync::atomic::Ordering::Relaxed);
+                    crate::split::role::set_peripheral_link(false);
                 }
                 Err(BleHostError::BleHost(Error::Timeout)) => {
                     error!("Connect to split central timeout");

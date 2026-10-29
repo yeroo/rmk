@@ -542,9 +542,10 @@ pub(crate) fn encode_claim(side: crate::split::role::Side, out: &mut [u8; 31]) -
         (crate::SPLIT_PRODUCT_ID >> 8) as u8,
         (side == crate::split::role::Side::Right) as u8,
     ];
+    // Not discoverable: this must never show up in a host's "add a device" list.
     AdStructure::encode_slice(
         &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::Flags(BR_EDR_NOT_SUPPORTED),
             AdStructure::ManufacturerSpecificData {
                 company_identifier: SPLIT_COMPANY_ID,
                 payload: &payload,
@@ -590,9 +591,9 @@ pub(crate) fn parse_claim(data: &[u8]) -> Option<crate::split::role::Side> {
 /// linked, advertise the master claim in bursts so a default central that still thinks it is
 /// the master yields (`role_task`). Idle on every other half/role.
 pub async fn run_master_claim<'b, 's: 'b, C: Controller>(stack: &'b Stack<'s, C, DefaultPacketPool>) {
-    use crate::split::role::{Role, current_role, current_side, default_role};
+    use crate::split::role::{Role, current_role, current_side, default_role, dynamic_active};
     let side = current_side();
-    if current_role() != Role::Central || default_role(side) == Role::Central {
+    if !dynamic_active() || current_role() != Role::Central || default_role(side) == Role::Central {
         core::future::pending::<()>().await;
     }
     wait_for_stack_started().await;
@@ -634,8 +635,8 @@ pub async fn run_master_claim<'b, 's: 'b, C: Controller>(stack: &'b Stack<'s, C,
 async fn claim_scan_window<C: Controller + ControllerCmdSync<LeSetScanParams>>(
     central: &mut Central<'_, C, DefaultPacketPool>,
 ) {
-    use crate::split::role::{Role, current_role, current_side, default_role};
-    if current_role() != Role::Central || default_role(current_side()) != Role::Central {
+    use crate::split::role::{Role, current_role, current_side, default_role, dynamic_active};
+    if !dynamic_active() || current_role() != Role::Central || default_role(current_side()) != Role::Central {
         return;
     }
     let Ok(_guard) = SCANNING_MUTEX.try_lock() else { return };

@@ -8,7 +8,6 @@ use serde::{Deserializer, Serializer};
 use crate::event::{BatteryStatusEvent, BleAdvertisingMode};
 use crate::event::{KeyboardEvent, PointingEvent};
 
-#[cfg(feature = "_ble")]
 pub mod role;
 #[cfg(feature = "_ble")]
 pub mod role_task;

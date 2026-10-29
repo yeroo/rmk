@@ -1,4 +1,6 @@
 use proc_macro2::TokenStream as TokenStream2;
+
+use crate::codegen::dynamic_role::{DynSide, central_hardware_view, strip_bind_interrupts, wrap_role_module};
 use quote::quote;
 use rmk_config::resolved::hardware::{
     BoardConfig, ChipSeries, KeyInfo, MatrixConfig, MatrixType, UniBodyConfig,
@@ -25,8 +27,6 @@ use super::split::central::expand_split_central_config;
 use super::watchdog::expand_watchdog_init;
 
 /// Parse keyboard mod and generate a valid RMK main function with all needed code
-use crate::codegen::dynamic_role::{DynSide, central_hardware_view, strip_bind_interrupts, wrap_role_module};
-
 pub(crate) fn parse_keyboard_mod(item_mod: syn::ItemMod) -> TokenStream2 {
     let rmk_features = get_rmk_features();
 

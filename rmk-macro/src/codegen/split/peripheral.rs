@@ -402,7 +402,7 @@ fn expand_split_peripheral(
     if dynamic.is_some() {
         chip_init.extend(usb_config_default(hardware));
         extra_tasks.push(quote! {
-            ::rmk::usb::UsbTransport::new(driver, KEYBOARD_DEVICE_CONFIG).run()
+            ::rmk::usb::run_usb_enumeration_probe(driver, KEYBOARD_DEVICE_CONFIG)
         });
         extra_tasks.push(quote! { ::rmk::split::role_task::run_role_task() });
     }

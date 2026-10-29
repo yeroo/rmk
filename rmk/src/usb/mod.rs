@@ -281,6 +281,24 @@ pub struct UsbTransport<D: Driver<'static>> {
     logger: Option<embassy_usb::class::cdc_acm::CdcAcmClass<'static, D>>,
 }
 
+/// A USB device that only exists so this half can see whether a host enumerates it (the dynamic
+/// master's peripheral role): the keyboard's identity with a single input-only HID interface, no
+/// Vial collection to leave unanswered. `UsbDeviceHandler` keeps `LOCAL_USB_CONFIGURED` current.
+pub async fn run_usb_enumeration_probe<D: Driver<'static>>(driver: D, device_config: DeviceConfig<'static>) -> ! {
+    #[cfg(feature = "_nrf_ble")]
+    let device_config = {
+        let mut device_config = device_config;
+        device_config.serial_number = crate::ble::nrf::get_serial_number();
+        device_config
+    };
+    let mut builder: Builder<'static, D> = new_usb_builder(driver, device_config);
+    let _keyboard = add_usb_writer!(&mut builder, KeyboardReport, 8);
+    let mut device = builder.build();
+    loop {
+        device.run().await;
+    }
+}
+
 impl<D: Driver<'static>> UsbTransport<D> {
     pub fn new(driver: D, device_config: DeviceConfig<'static>) -> Self {
         // nRF chips don't have a stable USB serial number unless one is derived

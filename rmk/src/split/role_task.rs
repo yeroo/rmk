@@ -4,11 +4,10 @@
 use core::sync::atomic::Ordering;
 
 use embassy_time::{Duration, Timer};
-use rmk_types::connection::UsbState;
 
 use super::role::{
-    Decision, HANDOFF_SETTLE_MS, LOCAL_USB_CONFIGURED, PEER_CLAIM_SEEN, PERIPHERAL_LINK_UP, ROLE_HANDOFF_TX, Role,
-    RoleInputs, RoleMachine, Side, current_role, current_side, reset_into,
+    CENTRAL_HAS_USB_HOST, Decision, HANDOFF_SETTLE_MS, LOCAL_USB_CONFIGURED, PEER_CLAIM_SEEN, PERIPHERAL_LINK_UP,
+    ROLE_HANDOFF_TX, Role, RoleInputs, RoleMachine, Side, current_role, current_side, reset_into,
 };
 
 const POLL_MS: u64 = 250;
@@ -29,8 +28,9 @@ pub async fn run_role_task() -> ! {
             local_usb_configured: LOCAL_USB_CONFIGURED.load(Ordering::Relaxed),
             vbus: vbus_present(),
             link_up,
-            // Only meaningful on the peripheral, whose status is the central's synced copy.
-            central_has_usb_host: role == Role::Peripheral && crate::state::current_usb_state() == UsbState::Configured,
+            // From the central's synced status only; `current_usb_state()` is also written by this
+            // half's own USB device and would mirror `local_usb_configured`.
+            central_has_usb_host: role == Role::Peripheral && CENTRAL_HAS_USB_HOST.load(Ordering::Relaxed),
             peer_claim_seen: PEER_CLAIM_SEEN.try_take().is_some(),
             ble_host_connected: false,
         };
@@ -42,6 +42,10 @@ pub async fn run_role_task() -> ! {
                 info!("role: yield to the peer's master claim");
                 announce_handoff(side != Side::Left).await;
                 reset_into(Role::Peripheral)
+            }
+            Decision::ResumeDefault => {
+                info!("role: no link and no host as a peripheral for too long, resuming the default role");
+                reset_into(Role::Central)
             }
         }
     }
@@ -63,11 +67,12 @@ async fn handoff(new_central_is_left: bool, link_up: bool, new_role: Role) -> ! 
 }
 
 /// Let the layout helper show "switching master" before this half disappears from the host.
-async fn announce_handoff(new_central_is_left: bool) {
+pub(crate) async fn announce_handoff(new_central_is_left: bool) {
     #[cfg(feature = "layer_notify")]
     {
         crate::host::layer_notify::notify_handoff(new_central_is_left, crate::host::layer_notify::now_ms());
-        Timer::after_millis(50).await;
+        // Long enough for one Bluetooth connection interval with slave latency.
+        Timer::after_millis(150).await;
     }
     #[cfg(not(feature = "layer_notify"))]
     let _ = new_central_is_left;

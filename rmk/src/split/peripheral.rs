@@ -135,6 +135,11 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                     Ok(split_message) => match split_message {
                         SplitMessage::ConnectionStatus(status) => {
                             trace!("Received central connection status: {:?}", status);
+                            // Kept apart from the local USB device's own state (`role_task` C1).
+                            crate::split::role::CENTRAL_HAS_USB_HOST.store(
+                                crate::split::role::central_status_has_host(status.usb),
+                                core::sync::atomic::Ordering::Relaxed,
+                            );
                             update_status(|c| *c = status);
                         }
                         #[cfg(feature = "_ble")]
