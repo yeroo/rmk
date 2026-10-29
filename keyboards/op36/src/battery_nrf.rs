@@ -58,8 +58,12 @@ impl Op36Battery {
             }
             Err(_) => 0,
         };
+        // The level stays live while charging (Boris's choice): it reads near 100 during the
+        // last stretch because the charger pulls the cell voltage up before the cell is full.
+        // `VBUSDETECT` is a plain register read (no interrupt enabled), like the K04 does it.
+        let usb_powered = embassy_nrf::pac::POWER.usbregstatus().read().vbusdetect();
         publish_battery_status(BatteryStatus::Available {
-            charge_state: ChargeState::Unknown,
+            charge_state: if usb_powered { ChargeState::Charging } else { ChargeState::Discharging },
             level: Some(level),
         });
     }
