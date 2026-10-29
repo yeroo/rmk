@@ -32,6 +32,8 @@ pub(crate) struct LayerState {
 struct Subscription {
     transport: HostTransport,
     deadline_ms: u64,
+    /// Last state pushed to this subscriber; identical states are not repeated.
+    last_sent: Option<LayerState>,
 }
 
 static SUBSCRIPTION: Mutex<RawMutex, RefCell<Option<Subscription>>> = Mutex::new(RefCell::new(None));
@@ -53,6 +55,7 @@ pub(crate) fn subscribe(transport: HostTransport, ttl_secs: u8, now_ms: u64) {
     let sub = (ttl_secs > 0).then(|| Subscription {
         transport,
         deadline_ms: now_ms + u64::from(ttl_secs.min(MAX_TTL_SECS)) * 1_000,
+        last_sent: None,
     });
     SUBSCRIPTION.lock(|cell| *cell.borrow_mut() = sub);
 }
@@ -72,9 +75,28 @@ pub(crate) fn active_subscriber(now_ms: u64) -> Option<HostTransport> {
     })
 }
 
-/// Send `state` to the subscriber, if any. Non-blocking; dropped when the reply queue is full.
+/// Send `state` to the subscriber, if any and if it differs from the last state sent to it.
+/// Non-blocking; dropped when the reply queue is full.
 pub(crate) fn notify(state: LayerState, now_ms: u64) {
-    if let Some(transport) = active_subscriber(now_ms) {
+    let transport = SUBSCRIPTION.lock(|cell| {
+        let mut slot = cell.borrow_mut();
+        match slot.as_mut() {
+            Some(sub) if now_ms < sub.deadline_ms => {
+                if sub.last_sent == Some(state) {
+                    None
+                } else {
+                    sub.last_sent = Some(state);
+                    Some(sub.transport)
+                }
+            }
+            Some(_) => {
+                *slot = None;
+                None
+            }
+            None => None,
+        }
+    });
+    if let Some(transport) = transport {
         try_send_host_reply(transport, encode_state(state));
     }
 }
@@ -239,6 +261,42 @@ mod tests {
             let sent = crate::channel::HOST_USB_REPLY.try_receive().expect("layer change pushed");
             assert_eq!(&sent[..6], &[0xE9, 0x01, 1, 0, 0x02, 0x00]);
         });
+    }
+
+    #[test]
+    fn unchanged_state_is_sent_once() {
+        let _g = test_lock().lock().unwrap();
+        drain_usb_replies();
+        subscribe(HostTransport::Usb, 60, 0);
+        let state = LayerState {
+            active: 0,
+            default: 0,
+            mask: 0,
+            fw_layout: 0,
+        };
+        notify(state, 0);
+        notify(state, 1);
+        notify(state, 2);
+        assert!(crate::channel::HOST_USB_REPLY.try_receive().is_ok(), "first state is sent");
+        assert!(crate::channel::HOST_USB_REPLY.try_receive().is_err(), "identical repeats are not");
+    }
+
+    #[test]
+    fn fresh_subscription_resends_current_state_on_next_change() {
+        let _g = test_lock().lock().unwrap();
+        drain_usb_replies();
+        let state = LayerState {
+            active: 1,
+            default: 0,
+            mask: 0b10,
+            fw_layout: 0,
+        };
+        subscribe(HostTransport::Usb, 60, 0);
+        notify(state, 0);
+        drain_usb_replies();
+        subscribe(HostTransport::Usb, 60, 1); // renew or new subscriber: dedupe memory resets
+        notify(state, 2);
+        assert!(crate::channel::HOST_USB_REPLY.try_receive().is_ok());
     }
 
     #[test]
