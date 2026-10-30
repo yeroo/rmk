@@ -193,6 +193,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         SplitMessage::RoleHandoff { new_central_is_left } => {
                             crate::split::role::apply_handoff_received(new_central_is_left).await
                         }
+                        SplitMessage::FirmwareBuild(_) => {}
                         // --- dfu_split: firmware update handlers ---
                         #[cfg(feature = "dfu_split")]
                         SplitMessage::FirmwareHashQuery => {

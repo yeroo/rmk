@@ -229,6 +229,17 @@ pub static PEER_CLAIM_SEEN: Signal<crate::RawMutex, ()> = Signal::new();
 pub static PERIPHERAL_LINK_UP: AtomicBool = AtomicBool::new(false);
 /// The split link went up or down: a subscribed host is told at once (`layer_notify`).
 pub static PEER_LINK_CHANGED: Signal<crate::RawMutex, ()> = Signal::new();
+/// The other half's firmware build, as it announced it after the last handshake (zero-padded).
+static PEER_FIRMWARE_BUILD: embassy_sync::blocking_mutex::Mutex<crate::RawMutex, core::cell::Cell<[u8; 24]>> =
+    embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new([0u8; 24]));
+
+pub fn set_peer_firmware_build(build: [u8; 24]) {
+    PEER_FIRMWARE_BUILD.lock(|c| c.set(build));
+}
+
+pub fn peer_firmware_build() -> [u8; 24] {
+    PEER_FIRMWARE_BUILD.lock(|c| c.get())
+}
 /// The other half's address as the central knows it; only a claim from this address counts.
 static PEER_ADDRESS: embassy_sync::blocking_mutex::Mutex<crate::RawMutex, core::cell::Cell<Option<[u8; 6]>>> =
     embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));

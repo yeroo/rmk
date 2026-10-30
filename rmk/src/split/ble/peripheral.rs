@@ -213,6 +213,11 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<
 
                     publish_event(CentralConnectedEvent { connected: true });
                     crate::split::role::set_peripheral_link(true);
+                    #[cfg(feature = "layer_notify")]
+                    split_driver
+                        .write(&SplitMessage::FirmwareBuild(crate::host::layer_notify::firmware_build_bytes()))
+                        .await
+                        .ok();
                     publish_peripheral_split_state(id, SplitConnectionState::Connected);
                     if !central_saved || central_addr != Some(new_addr) {
                         info!("Saving validated split central address to storage");

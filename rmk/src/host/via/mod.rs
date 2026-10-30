@@ -97,6 +97,21 @@ fn host_data_text(data: &[u8; 32]) -> &str {
 
 /// Flags byte of the battery-halves reply: bit0/1 = left/right level known, bit2/3 = left/right on
 /// USB power (the layout helper draws a charging bolt from these).
+/// Reply to the firmware-build query for one half: this half's own build id, or what the other
+/// half announced over the split link (empty until it did).
+#[cfg(feature = "layer_notify")]
+fn firmware_build_reply(side_is_right: bool) -> [u8; 32] {
+    #[cfg(all(feature = "split", feature = "_ble"))]
+    {
+        let own_is_right = crate::split::role::current_side() == crate::split::role::Side::Right;
+        if side_is_right != own_is_right {
+            let peer = crate::split::role::peer_firmware_build();
+            return layer_notify::encode_firmware(side_is_right, layer_notify::build_text(&peer));
+        }
+    }
+    layer_notify::encode_firmware(side_is_right, layer_notify::FIRMWARE_BUILD.as_bytes())
+}
+
 fn battery_flags(left: rmk_types::battery::BatteryStatus, right: rmk_types::battery::BatteryStatus) -> u8 {
     let charging = |status: rmk_types::battery::BatteryStatus| {
         matches!(
@@ -617,6 +632,11 @@ impl<'a> VialService<'a> {
                 #[cfg(feature = "layer_notify")]
                 if self.is_layer_notify_request(report) {
                     report.input_data = layer_notify::encode_state(self.layer_state());
+                    return;
+                }
+                #[cfg(feature = "layer_notify")]
+                if report.output_data[1] == layer_notify::NAMESPACE && report.output_data[2] == layer_notify::SUB_FIRMWARE {
+                    report.input_data = firmware_build_reply(report.output_data[3] == 1);
                     return;
                 }
                 if report.output_data[1] == ERGOHAVEN_CUSTOM_NAMESPACE

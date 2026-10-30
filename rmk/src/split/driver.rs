@@ -249,6 +249,7 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
             SplitMessage::RoleHandoff { new_central_is_left } => {
                 crate::split::role::apply_handoff_received(new_central_is_left).await
             }
+            SplitMessage::FirmwareBuild(build) => crate::split::role::set_peer_firmware_build(build),
             #[cfg(feature = "_ble")]
             SplitMessage::BatteryStatus(state) => {
                 use crate::event::PeripheralBatteryEvent;

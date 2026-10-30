@@ -126,8 +126,11 @@ pub(crate) enum SplitMessage {
     #[cfg(feature = "display")]
     SleepState(bool),
     /// Dynamic master: the sender announces who becomes central; both halves reset into
-    /// their new roles (`split::role`). Kept last so earlier discriminants never move.
+    /// their new roles (`split::role`).
     RoleHandoff { new_central_is_left: bool },
+    /// Peripheral → central after the handshake: its firmware build id, zero-padded
+    /// (`host::layer_notify::FIRMWARE_BUILD`). Kept last so earlier discriminants never move.
+    FirmwareBuild([u8; 24]),
 }
 
 // -----------------------------------------------------------------------

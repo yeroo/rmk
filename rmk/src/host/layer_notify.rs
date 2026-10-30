@@ -19,6 +19,15 @@ pub(crate) const NAMESPACE: u8 = 0xE9;
 pub(crate) const SUB_STATE: u8 = 0x01;
 /// Sub-id: master handoff notification `E9 02 side` (0 = left becomes master, 1 = right).
 pub(crate) const SUB_HANDOFF: u8 = 0x02;
+/// Sub-id: firmware build of one half. Request `08 E9 03 side`, reply `E9 03 side len text…`.
+pub(crate) const SUB_FIRMWARE: u8 = 0x03;
+/// Longest build string carried in a packet (`v0.2.0-21-g4bf2fa45` fits; a `-dirty` suffix is cut).
+pub(crate) const FIRMWARE_BUILD_MAX: usize = 24;
+/// This half's build id (`git describe` at build time), empty when the build script had no git.
+pub(crate) const FIRMWARE_BUILD: &str = match option_env!("RMK_FIRMWARE_BUILD") {
+    Some(s) => s,
+    None => "",
+};
 /// `fw_layout` bit telling the host that the right half is the central (dynamic master).
 pub(crate) const FW_LAYOUT_CENTRAL_RIGHT: u8 = 0x80;
 /// `fw_layout` bit telling the host that the other half is linked to this one.
@@ -63,6 +72,33 @@ pub(crate) fn encode_state(state: LayerState) -> [u8; 32] {
         out[6] |= FW_LAYOUT_CENTRAL_RIGHT;
     }
     out
+}
+
+/// `E9 03 side len text…`; the text is cut to `FIRMWARE_BUILD_MAX` bytes.
+pub(crate) fn encode_firmware(side_is_right: bool, build: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[0] = NAMESPACE;
+    out[1] = SUB_FIRMWARE;
+    out[2] = side_is_right as u8;
+    let n = build.len().min(FIRMWARE_BUILD_MAX);
+    out[3] = n as u8;
+    out[4..4 + n].copy_from_slice(&build[..n]);
+    out
+}
+
+/// This half's build as a fixed, zero-padded array (what the split link carries to the other half).
+pub(crate) fn firmware_build_bytes() -> [u8; FIRMWARE_BUILD_MAX] {
+    let mut out = [0u8; FIRMWARE_BUILD_MAX];
+    let b = FIRMWARE_BUILD.as_bytes();
+    let n = b.len().min(FIRMWARE_BUILD_MAX);
+    out[..n].copy_from_slice(&b[..n]);
+    out
+}
+
+/// The build string stored for one half, as sent over the link: text up to the first zero byte.
+pub(crate) fn build_text(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    &bytes[..end]
 }
 
 /// `E9 02 side`, rest zero.
@@ -184,6 +220,26 @@ mod tests {
         // The helper must learn about an offline half at once, not at the next layer change.
         let state = LayerState { active: 0, default: 0, mask: 1, fw_layout: 0, peer_linked: true };
         assert_ne!(state, LayerState { peer_linked: false, ..state });
+    }
+
+    #[test]
+    fn encode_firmware_carries_side_length_and_text() {
+        let p = encode_firmware(true, b"v0.2.0-21-g4bf2fa45");
+        assert_eq!(&p[..4], &[0xE9, 0x03, 1, 19]);
+        assert_eq!(&p[4..23], b"v0.2.0-21-g4bf2fa45");
+        assert!(p[23..].iter().all(|b| *b == 0));
+        let long = encode_firmware(false, &[b'x'; 40]);
+        assert_eq!(long[3] as usize, FIRMWARE_BUILD_MAX);
+        let none = encode_firmware(false, b"");
+        assert_eq!(&none[..4], &[0xE9, 0x03, 0, 0]);
+    }
+
+    #[test]
+    fn build_text_stops_at_the_padding() {
+        let mut bytes = [0u8; FIRMWARE_BUILD_MAX];
+        bytes[..5].copy_from_slice(b"v1.2.");
+        assert_eq!(build_text(&bytes), b"v1.2.");
+        assert_eq!(build_text(&[0u8; 4]), b"");
     }
 
     #[test]
