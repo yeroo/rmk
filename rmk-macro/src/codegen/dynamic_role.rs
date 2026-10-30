@@ -14,6 +14,7 @@ use rmk_config::resolved::hardware::{BoardConfig, SplitConfig};
 use syn::ItemMod;
 
 use crate::codegen::chip::bind_interrupt::expand_bind_interrupt;
+use crate::codegen::feature::{get_rmk_features, is_feature_enabled};
 use crate::codegen::keyboard_config::read_keyboard_toml_config;
 
 /// The physical half a dual-role binary is built for (`dynamic_role = "left" | "right"`).
@@ -140,6 +141,15 @@ pub(crate) fn expand_dynamic_main(side: DynSide) -> TokenStream2 {
     let empty_mod: ItemMod = syn::parse_quote! { mod __rmk_dynamic_main {} };
     let irqs = only_bind_interrupts(expand_bind_interrupt(&central_view, &empty_mod));
     let side_tokens = side.tokens();
+    // `RMK_FIRMWARE_BUILD` comes from this keyboard's build script (git describe); a build-script
+    // env is visible only in the keyboard crate, so the generated main hands it to rmk.
+    let set_build = if is_feature_enabled(&get_rmk_features(), "layer_notify") {
+        quote! {
+            ::rmk::host::layer_notify::set_firmware_build(option_env!("RMK_FIRMWARE_BUILD").unwrap_or(""));
+        }
+    } else {
+        quote! {}
+    };
     quote! {
         #irqs
         #[::embassy_executor::main]
@@ -147,6 +157,7 @@ pub(crate) fn expand_dynamic_main(side: DynSide) -> TokenStream2 {
             let side = #side_tokens;
             let role = ::rmk::split::role::read_boot_role().unwrap_or(::rmk::split::role::default_role(side));
             ::rmk::split::role::init(side, role);
+            #set_build
             match role {
                 ::rmk::split::role::Role::Central => as_central::run(spawner).await,
                 ::rmk::split::role::Role::Peripheral => as_peripheral::run(spawner).await,

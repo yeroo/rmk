@@ -109,7 +109,7 @@ fn firmware_build_reply(side_is_right: bool) -> [u8; 32] {
             return layer_notify::encode_firmware(side_is_right, layer_notify::build_text(&peer));
         }
     }
-    layer_notify::encode_firmware(side_is_right, layer_notify::FIRMWARE_BUILD.as_bytes())
+    layer_notify::encode_firmware(side_is_right, layer_notify::firmware_build().as_bytes())
 }
 
 fn battery_flags(left: rmk_types::battery::BatteryStatus, right: rmk_types::battery::BatteryStatus) -> u8 {

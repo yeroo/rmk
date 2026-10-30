@@ -23,11 +23,17 @@ pub(crate) const SUB_HANDOFF: u8 = 0x02;
 pub(crate) const SUB_FIRMWARE: u8 = 0x03;
 /// Longest build string carried in a packet (`v0.2.0-21-g4bf2fa45` fits; a `-dirty` suffix is cut).
 pub(crate) const FIRMWARE_BUILD_MAX: usize = 24;
-/// This half's build id (`git describe` at build time), empty when the build script had no git.
-pub(crate) const FIRMWARE_BUILD: &str = match option_env!("RMK_FIRMWARE_BUILD") {
-    Some(s) => s,
-    None => "",
-};
+/// This half's build id (`git describe` at build time). `cargo:rustc-env` from the keyboard's
+/// build script is visible only in the keyboard crate, so the generated `main` hands it over.
+static FIRMWARE_BUILD: Mutex<RawMutex, core::cell::Cell<&'static str>> = Mutex::new(core::cell::Cell::new(""));
+
+pub fn set_firmware_build(build: &'static str) {
+    FIRMWARE_BUILD.lock(|c| c.set(build));
+}
+
+pub(crate) fn firmware_build() -> &'static str {
+    FIRMWARE_BUILD.lock(|c| c.get())
+}
 /// `fw_layout` bit telling the host that the right half is the central (dynamic master).
 pub(crate) const FW_LAYOUT_CENTRAL_RIGHT: u8 = 0x80;
 /// `fw_layout` bit telling the host that the other half is linked to this one.
@@ -89,7 +95,7 @@ pub(crate) fn encode_firmware(side_is_right: bool, build: &[u8]) -> [u8; 32] {
 /// This half's build as a fixed, zero-padded array (what the split link carries to the other half).
 pub(crate) fn firmware_build_bytes() -> [u8; FIRMWARE_BUILD_MAX] {
     let mut out = [0u8; FIRMWARE_BUILD_MAX];
-    let b = FIRMWARE_BUILD.as_bytes();
+    let b = firmware_build().as_bytes();
     let n = b.len().min(FIRMWARE_BUILD_MAX);
     out[..n].copy_from_slice(&b[..n]);
     out

@@ -2,7 +2,7 @@
 pub(crate) mod ble;
 pub(crate) mod context;
 #[cfg(feature = "layer_notify")]
-pub(crate) mod layer_notify;
+pub mod layer_notify;
 #[cfg(feature = "storage")]
 pub(crate) mod storage;
 #[cfg(not(feature = "_no_usb"))]
