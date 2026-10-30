@@ -328,6 +328,7 @@ impl KeyMapInner<'_> {
                 default: self.behavior.default_layer,
                 mask: self.layer_mask(),
                 fw_layout: crate::host_data::layout().unwrap_or(0),
+                peer_linked: crate::host::layer_notify::peer_linked_now(),
             },
             crate::host::layer_notify::now_ms(),
         );

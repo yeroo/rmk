@@ -243,14 +243,20 @@ pub(crate) fn all_peripherals_connected() -> bool {
 
 fn publish_peripheral_connection(id: usize, connected: bool) {
     let bit = bit_for_peri(id);
-    CONNECTED_PERIPHERALS.lock(|state| {
+    let changed = CONNECTED_PERIPHERALS.lock(|state| {
         let next = if connected {
             state.get() | bit
         } else {
             state.get() & !bit
         };
+        let changed = next != state.get();
         state.set(next);
+        changed
     });
+    if changed {
+        // Only real transitions, so a reconnect attempt loop does not spam the host.
+        crate::split::role::PEER_LINK_CHANGED.signal(());
+    }
     publish_event(PeripheralConnectedEvent { id, connected });
     PERIPHERAL_CONNECTION_CHANGED.signal(());
 }

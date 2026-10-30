@@ -21,6 +21,8 @@ pub(crate) const SUB_STATE: u8 = 0x01;
 pub(crate) const SUB_HANDOFF: u8 = 0x02;
 /// `fw_layout` bit telling the host that the right half is the central (dynamic master).
 pub(crate) const FW_LAYOUT_CENTRAL_RIGHT: u8 = 0x80;
+/// `fw_layout` bit telling the host that the other half is linked to this one.
+pub(crate) const FW_LAYOUT_PEER_LINKED: u8 = 0x40;
 /// Longest subscription a host may ask for.
 pub(crate) const MAX_TTL_SECS: u8 = 120;
 
@@ -30,6 +32,8 @@ pub(crate) struct LayerState {
     pub default: u8,
     pub mask: u16,
     pub fw_layout: u8,
+    /// The other half is connected to this one (the helper dims a half that is not).
+    pub peer_linked: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -50,7 +54,10 @@ pub(crate) fn encode_state(state: LayerState) -> [u8; 32] {
     out[2] = state.active;
     out[3] = state.default;
     out[4..6].copy_from_slice(&state.mask.to_le_bytes());
-    out[6] = state.fw_layout;
+    out[6] = state.fw_layout & 0x3F;
+    if state.peer_linked {
+        out[6] |= FW_LAYOUT_PEER_LINKED;
+    }
     #[cfg(all(feature = "split", feature = "_ble"))]
     if !crate::split::role::central_is_left_now() {
         out[6] |= FW_LAYOUT_CENTRAL_RIGHT;
@@ -125,6 +132,18 @@ pub(crate) fn notify(state: LayerState, now_ms: u64) {
     }
 }
 
+/// Whether the other half is linked; `true` when this firmware is not a BLE split (nothing to miss).
+pub(crate) fn peer_linked_now() -> bool {
+    #[cfg(all(feature = "split", feature = "_ble"))]
+    {
+        crate::split::role::peer_linked()
+    }
+    #[cfg(not(all(feature = "split", feature = "_ble")))]
+    {
+        true
+    }
+}
+
 /// Milliseconds since boot; fixed at `0` in host tests so dispatcher tests are deterministic.
 pub(crate) fn now_ms() -> u64 {
     #[cfg(test)]
@@ -150,6 +169,24 @@ mod tests {
     }
 
     #[test]
+    fn encode_state_reports_the_other_half_as_linked_or_offline() {
+        let state = LayerState { active: 0, default: 0, mask: 1, fw_layout: 0, peer_linked: true };
+        assert_eq!(encode_state(state)[6] & FW_LAYOUT_PEER_LINKED, FW_LAYOUT_PEER_LINKED);
+        let offline = LayerState { peer_linked: false, ..state };
+        assert_eq!(encode_state(offline)[6] & FW_LAYOUT_PEER_LINKED, 0);
+        // The layout id keeps its own bits below the two status flags.
+        let with_layout = LayerState { fw_layout: 3, peer_linked: true, ..state };
+        assert_eq!(encode_state(with_layout)[6] & 0x3F, 3);
+    }
+
+    #[test]
+    fn a_link_change_alone_is_a_new_state_for_the_dedupe() {
+        // The helper must learn about an offline half at once, not at the next layer change.
+        let state = LayerState { active: 0, default: 0, mask: 1, fw_layout: 0, peer_linked: true };
+        assert_ne!(state, LayerState { peer_linked: false, ..state });
+    }
+
+    #[test]
     fn encode_handoff_layout() {
         assert_eq!(&encode_handoff(false)[..3], &[0xE9, 0x02, 1]);
         assert_eq!(&encode_handoff(true)[..3], &[0xE9, 0x02, 0]);
@@ -159,13 +196,14 @@ mod tests {
     #[test]
     fn encode_state_sets_central_right_bit_when_right_is_central() {
         use crate::split::role::{Role, Side, init};
-        let state = LayerState { active: 1, default: 0, mask: 0b10, fw_layout: 1 };
+        let state = LayerState { active: 1, default: 0, mask: 0b10, fw_layout: 1, peer_linked: true };
         init(Side::Right, Role::Central);
-        assert_eq!(encode_state(state)[6], 1 | FW_LAYOUT_CENTRAL_RIGHT);
+        let linked = 1 | FW_LAYOUT_PEER_LINKED;
+        assert_eq!(encode_state(state)[6], linked | FW_LAYOUT_CENTRAL_RIGHT);
         init(Side::Left, Role::Central);
-        assert_eq!(encode_state(state)[6], 1);
+        assert_eq!(encode_state(state)[6], linked);
         init(Side::Right, Role::Peripheral);
-        assert_eq!(encode_state(state)[6], 1, "left is central");
+        assert_eq!(encode_state(state)[6], linked, "left is central");
     }
 
     #[test]
@@ -175,8 +213,9 @@ mod tests {
             default: 0,
             mask: 0b0000_1110,
             fw_layout: 1,
+            peer_linked: true,
         });
-        assert_eq!(&bytes[..7], &[0xE9, 0x01, 3, 0, 0x0E, 0x00, 1]);
+        assert_eq!(&bytes[..7], &[0xE9, 0x01, 3, 0, 0x0E, 0x00, 1 | FW_LAYOUT_PEER_LINKED]);
         assert!(bytes[7..].iter().all(|b| *b == 0));
     }
 
@@ -247,7 +286,8 @@ mod tests {
                 default: 0,
                 mask: 0b10,
                 fw_layout: 0,
-            },
+            peer_linked: true,
+        },
             0,
         );
         assert!(crate::channel::HOST_USB_REPLY.try_receive().is_err());
@@ -264,11 +304,12 @@ mod tests {
                 default: 0,
                 mask: 0b100,
                 fw_layout: 1,
-            },
+            peer_linked: true,
+        },
             10,
         );
         let sent = crate::channel::HOST_USB_REPLY.try_receive().expect("one reply queued");
-        assert_eq!(&sent[..7], &[0xE9, 0x01, 2, 0, 0x04, 0x00, 1]);
+        assert_eq!(&sent[..7], &[0xE9, 0x01, 2, 0, 0x04, 0x00, 1 | FW_LAYOUT_PEER_LINKED]);
     }
 
     #[test]
@@ -283,7 +324,8 @@ mod tests {
                 default: 0,
                 mask: 0b10,
                 fw_layout: 0,
-            },
+            peer_linked: true,
+        },
             0,
         ); // must not panic
         assert_eq!(
@@ -316,6 +358,7 @@ mod tests {
             default: 0,
             mask: 0,
             fw_layout: 0,
+            peer_linked: true,
         };
         notify(state, 0);
         notify(state, 1);
@@ -333,6 +376,7 @@ mod tests {
             default: 0,
             mask: 0b10,
             fw_layout: 0,
+            peer_linked: true,
         };
         subscribe(HostTransport::Usb, 60, 0);
         notify(state, 0);

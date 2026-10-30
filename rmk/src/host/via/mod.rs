@@ -505,6 +505,7 @@ impl<'a> VialService<'a> {
             default: self.ctx.default_layer(),
             mask: self.ctx.layer_mask(),
             fw_layout: crate::host_data::layout().unwrap_or(0),
+            peer_linked: layer_notify::peer_linked_now(),
         }
     }
 
@@ -802,7 +803,28 @@ impl<'a> VialService<'a> {
 impl Runnable for VialService<'_> {
     async fn run(&mut self) -> ! {
         loop {
-            let (transport, output_data) = HOST_REQUEST_CHANNEL.receive().await;
+            // A split-link change must reach a subscribed host at once (an offline half is drawn
+            // dimmed), so it is awaited beside the request channel rather than polled.
+            #[cfg(all(feature = "layer_notify", feature = "split", feature = "_ble"))]
+            let request = match embassy_futures::select::select(
+                HOST_REQUEST_CHANNEL.receive(),
+                crate::split::role::PEER_LINK_CHANGED.wait(),
+            )
+            .await
+            {
+                embassy_futures::select::Either::First(request) => Some(request),
+                embassy_futures::select::Either::Second(()) => None,
+            };
+            #[cfg(not(all(feature = "layer_notify", feature = "split", feature = "_ble")))]
+            let request = Some(HOST_REQUEST_CHANNEL.receive().await);
+            #[cfg(all(feature = "layer_notify", feature = "split", feature = "_ble"))]
+            let Some((transport, output_data)) = request
+            else {
+                layer_notify::notify(self.layer_state(), layer_notify::now_ms());
+                continue;
+            };
+            #[cfg(not(all(feature = "layer_notify", feature = "split", feature = "_ble")))]
+            let (transport, output_data) = request.expect("request channel never yields None");
             if process_host_data_packet(&output_data) {
                 continue;
             }

@@ -227,6 +227,8 @@ pub static ROLE_HANDOFF_TX: Signal<crate::RawMutex, bool> = Signal::new();
 pub static PEER_CLAIM_SEEN: Signal<crate::RawMutex, ()> = Signal::new();
 /// Peripheral role: the split link to the central is up (maintained by `split::ble::peripheral`).
 pub static PERIPHERAL_LINK_UP: AtomicBool = AtomicBool::new(false);
+/// The split link went up or down: a subscribed host is told at once (`layer_notify`).
+pub static PEER_LINK_CHANGED: Signal<crate::RawMutex, ()> = Signal::new();
 /// The other half's address as the central knows it; only a claim from this address counts.
 static PEER_ADDRESS: embassy_sync::blocking_mutex::Mutex<crate::RawMutex, core::cell::Cell<Option<[u8; 6]>>> =
     embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new(None));
@@ -252,9 +254,23 @@ pub fn dynamic_active() -> bool {
 
 /// Peripheral role: the split link went up or down (a down link also forgets the central's status).
 pub fn set_peripheral_link(up: bool) {
-    PERIPHERAL_LINK_UP.store(up, Ordering::Relaxed);
+    let changed = PERIPHERAL_LINK_UP.swap(up, Ordering::Relaxed) != up;
     if !up {
         CENTRAL_HAS_USB_HOST.store(false, Ordering::Relaxed);
+    }
+    if changed {
+        PEER_LINK_CHANGED.signal(());
+    }
+}
+
+/// Whether the other half is connected to this one, in whichever role this half runs.
+pub fn peer_linked() -> bool {
+    match current_role() {
+        #[cfg(feature = "_ble")]
+        Role::Central => crate::split::ble::central::all_peripherals_connected(),
+        #[cfg(not(feature = "_ble"))]
+        Role::Central => true,
+        Role::Peripheral => PERIPHERAL_LINK_UP.load(Ordering::Relaxed),
     }
 }
 
